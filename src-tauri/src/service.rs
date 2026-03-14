@@ -51,7 +51,6 @@ pub enum ServiceError {
 
 #[derive(Debug, Clone)]
 struct Directories {
-    base: PathBuf,
     cache: PathBuf,
     staging: PathBuf,
     snapshots: PathBuf,
@@ -162,7 +161,6 @@ impl ManagerService {
             snapshots: base.join("snapshots"),
             exports: base.join("exports"),
             db: base.join("db").join("bronze_forge.sqlite"),
-            base,
         };
         fs::create_dir_all(&directories.cache)?;
         fs::create_dir_all(&directories.staging)?;
