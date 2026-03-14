@@ -27,7 +27,7 @@ The audit identified **14 high-leverage UX issues** across navigation, feedback,
 ## Findings Table
 
 | # | Issue | Heuristic | Severity | Status |
-|---|-------|-----------|----------|--------|
+| --- | --- | --- | --- | --- |
 | 1 | No loading state — app renders blank until scan completes | Visibility of system status | High | Fixed |
 | 2 | No active nav indicator for screen readers (`aria-current`) | Accessibility | High | Fixed |
 | 3 | Sidebar hidden below XL with no alternative navigation | Flexibility & efficiency | Critical | Fixed |
@@ -65,36 +65,43 @@ Changes were implemented in priority order following the task specification:
 ## Before / After Rationale
 
 ### Loading State
+
 - **Before:** Blank screen until `scanLiveState` resolves.
 - **After:** Centered spinner with "Loading…" text. Users immediately see the app is working.
 - **Heuristic:** Visibility of system status.
 
 ### Mobile Navigation
+
 - **Before:** Sidebar only visible at `xl:` breakpoint. Smaller screens had no way to navigate.
 - **After:** Sticky top bar with hamburger menu opens a slide-out drawer overlay. Drawer closes on nav selection, X button, or backdrop click.
 - **Heuristic:** Flexibility and efficiency of use.
 
 ### Toast Notifications
+
 - **Before:** No feedback after sync, profile switch, source registration, or any mutation.
 - **After:** Toast system with success (green) and error (red) toasts, auto-dismiss after 4 seconds, slide-in animation, dismiss button.
 - **Heuristic:** Visibility of system status.
 
 ### Destructive Apply Button
+
 - **Before:** Apply button always bronze/primary regardless of operation type.
 - **After:** Apply button turns red (`bg-red-600`) when the operation includes uninstalls/removals. Visual weight signals danger.
 - **Heuristic:** Error prevention.
 
 ### Heading Hierarchy
+
 - **Before:** Panel titles used `<p className="text-lg font-semibold">`. No `<h1>` on page.
 - **After:** Panel titles use `<h2>`. App name rendered as screen-reader-only `<h1>`. Proper document outline.
 - **Heuristic:** Accessibility (WCAG 1.3.1 Info and Relationships).
 
 ### Focus-visible Outlines
+
 - **Before:** No visible focus indicators on buttons, inputs, or nav items.
 - **After:** `focus-visible:outline-2 outline-bronze-300` on all interactive elements. Keyboard users can see where focus is.
 - **Heuristic:** Accessibility (WCAG 2.4.7 Focus Visible).
 
 ### Preflight Panel on Mobile
+
 - **Before:** Preflight panel only visible at `xl:` breakpoint as a sidebar.
 - **After:** On smaller screens, preflight opens as a bottom sheet drawer with backdrop overlay and Escape key dismiss.
 - **Heuristic:** Consistency and standards.
@@ -104,7 +111,7 @@ Changes were implemented in priority order following the task specification:
 ## Files Changed
 
 | File | Type of Change |
-|------|---------------|
+| --- | --- |
 | `src/App.tsx` | Major — added loading state, toast system, mobile nav, accessibility attributes, copy improvements, disabled states, destructive styling, search enhancements, heading hierarchy, preflight mobile drawer |
 | `src/index.css` | Minor — added `focus-visible` outlines, `disabled` states to button classes, toast animation keyframes, `prefers-reduced-motion` media query |
 | `src/App.test.tsx` | Minor — updated test assertion to match shortened panel title ("Control center") |
@@ -114,7 +121,7 @@ Changes were implemented in priority order following the task specification:
 ## Remaining UX Debt (Recommended Next Pass)
 
 | Area | Description | Priority |
-|------|-------------|----------|
+| --- | --- | --- |
 | Drag-and-drop | Profile reordering and addon priority via drag | Low |
 | Keyboard shortcuts | Global hotkeys for common actions (Ctrl+S save, Ctrl+1-6 screen nav) | Medium |
 | Undo support | Undo last sync/restore via toast action button | Medium |
