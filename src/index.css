@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: 'Segoe UI Variable Text', 'Bahnschrift', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.input {
+  @apply w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-bronze-50 outline-none transition placeholder:text-bronze-100/35 focus:border-bronze-300/35 focus:bg-black/35;
+}
+
+.button-primary {
+  @apply rounded-2xl bg-bronze-400 px-5 py-3 text-sm font-semibold text-[#20130c] transition hover:bg-bronze-300;
+}
+
+.button-secondary {
+  @apply rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-bronze-50 transition hover:bg-white/10;
+}
