@@ -51,6 +51,8 @@ Small trusted group:
 - testers
 - guildmates
 
+These users are not expected to install developer tooling. Distribution should be a simple Windows installer or app package that runs without Node.js, npm, Rust, Cargo, or Visual Studio Build Tools on the user machine.
+
 ### Future Users
 
 Broader Ascension players who want curated addon packs for Bronzebeard.
@@ -64,6 +66,7 @@ Broader Ascension players who want curated addon packs for Bronzebeard.
 - support multiple playstyle profiles
 - support stable, beta, and local-dev channels
 - improve dev/test workflow for addon iteration
+- make installation trivial for nontechnical Windows users
 
 ### Success Metrics
 
@@ -72,6 +75,7 @@ Broader Ascension players who want curated addon packs for Bronzebeard.
 - profile switch with no manual file edits
 - fewer broken UI incidents after experimental changes
 - one-click movement between stable and dev builds
+- first-time install requires only downloading and running the packaged app, with no developer toolchain setup
 
 ## 5. Non-Goals for MVP
 
@@ -134,6 +138,7 @@ User switches between Leveling, PvP, Raid, and Dev profiles without manually ren
 - conflict warnings
 - last-known-good restore
 - basic activity log
+- Windows packaging flow suitable for sharing with nontechnical users
 
 ### Excluded From MVP
 
@@ -143,6 +148,18 @@ User switches between Leveling, PvP, Raid, and Dev profiles without manually ren
 - per-character config intelligence
 - advanced diff viewer
 - crash log parsing
+
+## 8.1 Distribution Requirement
+
+The MVP must be distributable to a small trusted Windows audience as a packaged desktop application.
+
+Distribution requirements:
+
+- maintainer builds and packages the app
+- end users install a Windows package and run the app without command-line setup
+- end users must not need Node.js, npm, Rust, Cargo, or Visual Studio Build Tools
+- any required runtime prerequisites should be standard Windows dependencies with clear installer behavior or guidance
+- documentation should distinguish builder prerequisites from end-user prerequisites
 
 ## 9. Feature Requirements
 

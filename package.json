@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 1420 --strictPort",
     "build": "tsc -b && vite build",
+    "doctor:windows": "node scripts/doctor-windows.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:dev": "node scripts/tauri-runner.mjs dev",
+    "tauri:build": "node scripts/tauri-runner.mjs build",
     "test": "vitest run"
   },
   "dependencies": {

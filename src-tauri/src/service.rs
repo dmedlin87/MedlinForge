@@ -144,7 +144,7 @@ pub struct ManagerService {
 
 impl ManagerService {
     pub fn new(app_handle: &AppHandle) -> ServiceResult<Self> {
-        let base = app_handle.path().app_data_dir().ok_or_else(|| {
+        let base = app_handle.path().app_data_dir().map_err(|_| {
             ServiceError::Message("Could not resolve app data directory".to_string())
         })?;
         Self::from_base_dir(base)
