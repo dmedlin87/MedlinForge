@@ -39,6 +39,47 @@ impl std::str::FromStr for Channel {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateChannel {
+    Stable,
+    Beta,
+}
+
+impl UpdateChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+        }
+    }
+}
+
+impl std::fmt::Display for UpdateChannel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for UpdateChannel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stable" | "Stable" => Ok(Self::Stable),
+            "beta" | "Beta" => Ok(Self::Beta),
+            _ => Err(format!("Unsupported update channel '{value}'")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteProductType {
+    Manager,
+    Addon,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
     LocalFolder,
@@ -132,6 +173,10 @@ pub struct Settings {
     pub auto_backup_enabled: bool,
     pub default_profile_id: Option<String>,
     pub dev_mode_enabled: bool,
+    pub update_channel: UpdateChannel,
+    pub last_update_check_at: Option<DateTime<Utc>>,
+    pub last_update_error: Option<String>,
+    pub update_manifest_override: Option<String>,
 }
 
 impl Default for Settings {
@@ -144,6 +189,10 @@ impl Default for Settings {
             auto_backup_enabled: true,
             default_profile_id: None,
             dev_mode_enabled: true,
+            update_channel: UpdateChannel::Stable,
+            last_update_check_at: None,
+            last_update_error: None,
+            update_manifest_override: None,
         }
     }
 }
@@ -337,6 +386,8 @@ pub struct SaveSettingsRequest {
     pub auto_backup_enabled: Option<bool>,
     pub default_profile_id: Option<String>,
     pub dev_mode_enabled: Option<bool>,
+    pub update_channel: Option<UpdateChannel>,
+    pub update_manifest_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,4 +490,68 @@ pub struct PackageRevisionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PromoteRevisionRequest {
     pub revision_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRemoteAddonUpdateRequest {
+    pub addon_id: String,
+    pub profile_id: Option<String>,
+    pub preview_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallManagerUpdateRequest {
+    pub product_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProductUpdate {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub product_type: RemoteProductType,
+    pub channel: UpdateChannel,
+    pub current_version: Option<String>,
+    pub latest_version: String,
+    pub available: bool,
+    pub status: String,
+    pub published_at: String,
+    pub release_url: String,
+    pub package_url: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub install_kind: Option<String>,
+    pub changelog: Option<String>,
+    pub min_manager_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerUpdateStatus {
+    pub id: String,
+    pub current_version: String,
+    pub latest_version: String,
+    pub available: bool,
+    pub status: String,
+    pub release_url: String,
+    pub package_url: String,
+    pub changelog: Option<String>,
+    pub published_at: String,
+    pub downloaded_installer_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResponse {
+    pub channel: UpdateChannel,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub manifest_generated_at: Option<String>,
+    pub manifest_url: Option<String>,
+    pub stale: bool,
+    pub error_message: Option<String>,
+    pub manager: Option<ManagerUpdateStatus>,
+    pub addons: Vec<RemoteProductUpdate>,
 }

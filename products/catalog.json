@@ -1,0 +1,16 @@
+{
+  "publisher": "dmedlin87",
+  "pagesBaseUrl": "https://dmedlin87.github.io/MedlinForge",
+  "products": [
+    {
+      "id": "bronzeforge-manager",
+      "name": "BronzeForge Manager",
+      "type": "manager",
+      "repository": "dmedlin87/MedlinForge",
+      "channels": ["stable", "beta"],
+      "assetName": "bronzeforge-manager-windows-x64-installer.exe",
+      "installKind": "nsis-installer",
+      "platform": "windows-x64"
+    }
+  ]
+}

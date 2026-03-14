@@ -1,15 +1,17 @@
 mod manifest;
 mod models;
 mod service;
+mod update_provider;
 
 use std::sync::{Arc, Mutex};
 
 use models::{
-    ChangeChannelRequest, CreateProfileRequest, DetectPathsResponse, DuplicateProfileRequest,
-    ImportZipRequest, InstallAddonRequest, OperationResponse, PackageRevisionRequest,
+    ApplyRemoteAddonUpdateRequest, ChangeChannelRequest, CreateProfileRequest,
+    DetectPathsResponse, DuplicateProfileRequest, ImportZipRequest, InstallAddonRequest,
+    InstallManagerUpdateRequest, ManagerUpdateStatus, OperationResponse, PackageRevisionRequest,
     PromoteRevisionRequest, RefreshSourceRequest, RegisterSourceRequest, RestoreSnapshotRequest,
     SaveSettingsRequest, ScanStateResponse, SnapshotSummary, SwitchProfileRequest,
-    SyncProfileRequest,
+    SyncProfileRequest, UpdateCheckResponse,
 };
 use service::ManagerService;
 use tauri::{Manager, State};
@@ -171,6 +173,27 @@ fn list_unmanaged(state: State<'_, AppState>) -> Result<Vec<models::LiveFolderSt
     state.with_service(|service| service.list_unmanaged())
 }
 
+#[tauri::command]
+fn check_updates(state: State<'_, AppState>) -> Result<UpdateCheckResponse, String> {
+    state.with_service(|service| service.check_updates())
+}
+
+#[tauri::command]
+fn apply_remote_addon_update(
+    state: State<'_, AppState>,
+    request: ApplyRemoteAddonUpdateRequest,
+) -> Result<OperationResponse, String> {
+    state.with_service(|service| service.apply_remote_addon_update(request))
+}
+
+#[tauri::command]
+fn install_manager_update(
+    state: State<'_, AppState>,
+    request: InstallManagerUpdateRequest,
+) -> Result<ManagerUpdateStatus, String> {
+    state.with_service(|service| service.install_manager_update(request))
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -199,7 +222,10 @@ fn main() {
             restore_snapshot,
             package_revision,
             promote_revision,
-            list_unmanaged
+            list_unmanaged,
+            check_updates,
+            apply_remote_addon_update,
+            install_manager_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run BronzeForge Manager");

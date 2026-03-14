@@ -4,7 +4,20 @@ import clsx from 'clsx'
 
 import { api } from './lib/api'
 import { formatBytes, formatWhen } from './lib/format'
-import type { AddonRecord, Channel, CreateProfileRequest, DetectPathCandidate, OperationResponse, ProfileSelection, RegisterSourceRequest, SaveSettingsRequest, ScanStateResponse } from './types'
+import type {
+  AddonRecord,
+  Channel,
+  CreateProfileRequest,
+  DetectPathCandidate,
+  OperationResponse,
+  ProfileSelection,
+  RegisterSourceRequest,
+  RemoteProductUpdate,
+  SaveSettingsRequest,
+  ScanStateResponse,
+  UpdateChannel,
+  UpdateCheckResponse,
+} from './types'
 
 type Screen = 'dashboard' | 'addons' | 'profiles' | 'recovery' | 'settings' | 'developer'
 
@@ -27,7 +40,9 @@ const screens: Array<{ id: Screen; label: string; icon: typeof Boxes }> = [
 function App() {
   const [screen, setScreen] = useState<Screen>('dashboard')
   const [state, setState] = useState<ScanStateResponse | null>(null)
+  const [updates, setUpdates] = useState<UpdateCheckResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null)
   const [settingsDraft, setSettingsDraft] = useState<SaveSettingsRequest>({})
   const [sourceDraft, setSourceDraft] = useState<RegisterSourceRequest>({ sourceKind: 'local-folder', path: '', channel: 'stable', core: false })
@@ -46,6 +61,7 @@ function App() {
     return addon.displayName.toLowerCase().includes(query) || addon.installFolder.toLowerCase().includes(query) || addon.health.toLowerCase().includes(query)
   })
   const selectedProfile = state?.profiles.find((profile) => profile.id === selectedProfileId) ?? null
+  const updateByAddonId = new Map((updates?.addons ?? []).map((item) => [item.id, item]))
 
   function applyState(next: ScanStateResponse, preferredProfileId?: string | null) {
     startTransition(() => {
@@ -59,6 +75,8 @@ function App() {
       autoBackupEnabled: next.settings.autoBackupEnabled,
       devModeEnabled: next.settings.devModeEnabled,
       defaultProfileId: next.settings.defaultProfileId,
+      updateChannel: next.settings.updateChannel,
+      updateManifestOverride: next.settings.updateManifestOverride,
     })
     const resolvedProfileId =
       (preferredProfileId && next.profiles.some((profile) => profile.id === preferredProfileId) ? preferredProfileId : null) ??
@@ -74,13 +92,37 @@ function App() {
     }
   }
 
-  const refresh = async () => {
+  const refresh = async (includeUpdates = false) => {
     try {
       setError(null)
       const next = await api.scanLiveState()
       applyState(next, selectedProfileId)
+      if (includeUpdates) {
+        await refreshUpdates()
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to load BronzeForge state.')
+    }
+  }
+
+  async function refreshUpdates() {
+    setUpdateBusy(true)
+    try {
+      const next = await api.checkUpdates()
+      setUpdates(next)
+    } catch (caught) {
+      setUpdates((current) => ({
+        channel: settingsDraft.updateChannel ?? current?.channel ?? 'stable',
+        checkedAt: current?.checkedAt ?? null,
+        manifestGeneratedAt: current?.manifestGeneratedAt ?? null,
+        manifestUrl: current?.manifestUrl ?? null,
+        stale: true,
+        errorMessage: caught instanceof Error ? caught.message : 'Failed to check for updates.',
+        manager: current?.manager ?? null,
+        addons: current?.addons ?? [],
+      }))
+    } finally {
+      setUpdateBusy(false)
     }
   }
 
@@ -99,8 +141,9 @@ function App() {
       void (async () => {
         try {
           setError(null)
-          const next = await api.scanLiveState()
+          const [next, updateState] = await Promise.all([api.scanLiveState(), api.checkUpdates()])
           applyState(next, null)
+          setUpdates(updateState)
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : 'Failed to load BronzeForge state.')
         }
@@ -123,7 +166,7 @@ function App() {
         await api.syncProfile({ profileId, previewOnly: false, safeMode, isolateAddonId })
         if (switchAfter) await api.switchProfile({ profileId })
         setPendingOperation(null)
-        await refresh()
+        await refresh(false)
       },
     )
   }
@@ -137,7 +180,7 @@ function App() {
       async () => {
         await api.installAddon({ addonId, profileId: state.activeProfileId, previewOnly: false })
         setPendingOperation(null)
-        await refresh()
+        await refresh(false)
       },
     )
   }
@@ -151,7 +194,7 @@ function App() {
       async () => {
         await api.changeChannel({ addonId, profileId: state.activeProfileId, channel, previewOnly: false })
         setPendingOperation(null)
-        await refresh()
+        await refresh(false)
       },
     )
   }
@@ -165,7 +208,7 @@ function App() {
       async () => {
         await api.uninstallAddon({ addonId, profileId: state.activeProfileId, previewOnly: false })
         setPendingOperation(null)
-        await refresh()
+        await refresh(false)
       },
     )
   }
@@ -178,13 +221,14 @@ function App() {
       async () => {
         await api.restoreSnapshot({ snapshotId, previewOnly: false })
         setPendingOperation(null)
-        await refresh()
+        await refresh(false)
       },
     )
   }
 
   async function saveSettings() {
     applyState(await api.saveSettings(settingsDraft), selectedProfileId)
+    await refreshUpdates()
   }
 
   async function detectPaths() {
@@ -220,6 +264,31 @@ function App() {
     const beta = addon.latestRevisions.find((revision) => revision.channel === 'beta')
     if (!beta) return
     applyState(await api.promoteRevision({ revisionId: beta.id }), selectedProfileId)
+    await refreshUpdates()
+  }
+
+  async function previewRemoteAddonUpdate(addonId: string) {
+    if (!state?.activeProfileId) return
+    await preview(
+      'Remote update preview',
+      'Download and apply',
+      () => api.applyRemoteAddonUpdate({ addonId, profileId: state.activeProfileId, previewOnly: true }),
+      async () => {
+        await api.applyRemoteAddonUpdate({ addonId, profileId: state.activeProfileId, previewOnly: false })
+        setPendingOperation(null)
+        await refresh(true)
+      },
+    )
+  }
+
+  async function installManagerUpdate() {
+    try {
+      setError(null)
+      const next = await api.installManagerUpdate()
+      setUpdates((current) => current ? { ...current, manager: next } : current)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to install BronzeForge Manager update.')
+    }
   }
 
   return (
@@ -245,7 +314,7 @@ function App() {
               <div className="grid gap-4 md:grid-cols-3">
                 <Metric label="Managed addons" value={String(state?.addons.length ?? 0)} />
                 <Metric label="Profiles" value={String(state?.profiles.length ?? 0)} />
-                <Metric label="Latest snapshot" value={formatWhen(state?.snapshots[0]?.createdAt ?? null)} />
+                <Metric label="Updates available" value={String((updates?.addons.filter((item) => item.available).length ?? 0) + (updates?.manager?.available ? 1 : 0))} />
               </div>
             </Panel>
             <Panel title="Quick actions" subtitle="Safe defaults with rollback close at hand.">
@@ -253,17 +322,18 @@ function App() {
                 <button className="button-primary" onClick={() => state?.activeProfileId && void previewSync(state.activeProfileId)}>Sync active profile</button>
                 <button className="button-secondary" onClick={() => state?.snapshots[0] && void previewRestore(state.snapshots[0].id)}>Restore last known good</button>
                 <button className="button-secondary" onClick={() => state?.activeProfileId && void previewSync(state.activeProfileId, true)}>Prepare safe mode</button>
+                <button className="button-secondary" disabled={updateBusy} onClick={() => void refreshUpdates()}>{updateBusy ? 'Checking updates...' : 'Check updates'}</button>
               </div>
             </Panel>
           </section>
 
           {error ? <div className="rounded-3xl border border-rose-400/30 bg-rose-400/10 px-5 py-4 text-sm text-rose-100">{error}</div> : null}
 
-          {screen === 'dashboard' ? <Dashboard state={state} /> : null}
-          {screen === 'addons' ? <AddonsPanel addons={filteredAddons} search={addonSearch} setSearch={setAddonSearch} onInstall={previewInstall} onChannel={previewChannel} onRemove={previewRemove} onIsolate={(addonId) => state?.activeProfileId && void previewSync(state.activeProfileId, false, addonId)} /> : null}
+          {screen === 'dashboard' ? <Dashboard state={state} updates={updates} updateBusy={updateBusy} onRefreshUpdates={() => void refreshUpdates()} onInstallManagerUpdate={() => void installManagerUpdate()} /> : null}
+          {screen === 'addons' ? <AddonsPanel addons={filteredAddons} updates={updateByAddonId} search={addonSearch} setSearch={setAddonSearch} onInstall={previewInstall} onRemoteUpdate={previewRemoteAddonUpdate} onChannel={previewChannel} onRemove={previewRemove} onIsolate={(addonId) => state?.activeProfileId && void previewSync(state.activeProfileId, false, addonId)} /> : null}
           {screen === 'profiles' ? <ProfilesPanel state={state} selectedProfileId={selectedProfileId} setSelectedProfileId={selectProfile} profileName={profileName} setProfileName={setProfileName} profileNotes={profileNotes} setProfileNotes={setProfileNotes} profileSelections={profileSelections} updateSelection={updateSelection} onSave={() => void saveProfile(selectedProfile?.id)} onCreate={() => void saveProfile(null)} onDuplicate={(profileId) => void duplicateProfile(profileId)} onPreviewSwitch={(profileId) => void previewSync(profileId, false, null, true)} /> : null}
           {screen === 'recovery' ? <RecoveryPanel snapshots={state?.snapshots ?? []} onRestore={previewRestore} /> : null}
-          {screen === 'settings' ? <SettingsPanel draft={settingsDraft} setDraft={setSettingsDraft} detectedPaths={detectedPaths} onDetect={() => void detectPaths()} onSave={() => void saveSettings()} /> : null}
+          {screen === 'settings' ? <SettingsPanel draft={settingsDraft} updates={updates} setDraft={setSettingsDraft} detectedPaths={detectedPaths} onDetect={() => void detectPaths()} onSave={() => void saveSettings()} /> : null}
           {screen === 'developer' ? <DeveloperPanel state={state} draft={sourceDraft} setDraft={setSourceDraft} onRegister={() => void registerSource()} onPackage={(addon) => void packageAddon(addon)} onPromote={(addon) => void promoteBeta(addon)} exportPath={exportPath} /> : null}
         </main>
 
@@ -277,9 +347,71 @@ function App() {
   )
 }
 
-function Dashboard({ state }: { state: ScanStateResponse | null }) {
+function Dashboard({
+  state,
+  updates,
+  updateBusy,
+  onRefreshUpdates,
+  onInstallManagerUpdate,
+}: {
+  state: ScanStateResponse | null
+  updates: UpdateCheckResponse | null
+  updateBusy: boolean
+  onRefreshUpdates: () => void
+  onInstallManagerUpdate: () => void
+}) {
   return (
     <div className="grid gap-6 xl:grid-cols-[1.3fr_1fr]">
+      <Panel title="Update status" subtitle="GitHub manifest health, manager release visibility, and owned addon updates.">
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-semibold text-bronze-50">BronzeForge Manager</p>
+                <p className="mt-1 text-sm text-bronze-100/60">
+                  {updates?.manager ? `${updates.manager.currentVersion} -> ${updates.manager.latestVersion}` : 'No remote manager release cached'}
+                </p>
+              </div>
+              <StatusPill
+                label={updates?.manager?.status ?? 'unknown'}
+                tone={updates?.manager?.available ? 'warn' : 'ok'}
+              />
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button className="button-secondary" disabled={updateBusy} onClick={onRefreshUpdates}>
+                {updateBusy ? 'Checking updates...' : 'Refresh manifest'}
+              </button>
+              <button className="button-primary disabled:cursor-not-allowed disabled:opacity-40" disabled={!updates?.manager?.available} onClick={onInstallManagerUpdate}>
+                Install manager update
+              </button>
+            </div>
+            <p className="mt-3 text-xs text-bronze-100/45">
+              Last check: {formatWhen(updates?.checkedAt ?? state?.settings.lastUpdateCheckAt ?? null)}
+            </p>
+            {updates?.errorMessage ? (
+              <p className="mt-2 text-sm text-amber-100">
+                {updates.stale ? 'Using cached results.' : 'Update check failed.'} {updates.errorMessage}
+              </p>
+            ) : null}
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {(updates?.addons ?? []).slice(0, 4).map((item) => (
+              <div key={item.id} className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-semibold text-bronze-50">{item.name}</p>
+                  <StatusPill label={item.status} tone={item.available ? 'warn' : 'ok'} />
+                </div>
+                <p className="mt-2 text-sm text-bronze-100/60">
+                  {item.currentVersion ?? 'No local revision'} -&gt; {item.latestVersion}
+                </p>
+              </div>
+            ))}
+            {!(updates?.addons ?? []).length ? (
+              <Empty label="No owned addon updates cached." detail="Run a manifest refresh to pull the current stable or beta channel." compact />
+            ) : null}
+          </div>
+        </div>
+      </Panel>
       <Panel title="Issues" subtitle="Current blockers and warnings from the active profile plan.">
         <div className="space-y-3">
           {(state?.issues ?? []).length ? state?.issues.map((issue) => <IssueCard key={`${issue.code}-${issue.message}`} message={issue.message} severity={issue.severity} />) : <Empty label="No blockers right now." detail="The active BronzeForge sync plan is clear." compact />}
@@ -302,29 +434,57 @@ function Dashboard({ state }: { state: ScanStateResponse | null }) {
   )
 }
 
-function AddonsPanel({ addons, search, setSearch, onInstall, onChannel, onRemove, onIsolate }: { addons: AddonRecord[]; search: string; setSearch: (value: string) => void; onInstall: (addonId: string) => void; onChannel: (addonId: string, channel: Channel) => void; onRemove: (addonId: string) => void; onIsolate: (addonId: string) => void }) {
+function AddonsPanel({
+  addons,
+  updates,
+  search,
+  setSearch,
+  onInstall,
+  onRemoteUpdate,
+  onChannel,
+  onRemove,
+  onIsolate,
+}: {
+  addons: AddonRecord[]
+  updates: Map<string, RemoteProductUpdate>
+  search: string
+  setSearch: (value: string) => void
+  onInstall: (addonId: string) => void
+  onRemoteUpdate: (addonId: string) => void
+  onChannel: (addonId: string, channel: Channel) => void
+  onRemove: (addonId: string) => void
+  onIsolate: (addonId: string) => void
+}) {
   return (
     <Panel title="Managed addons" subtitle="Search the registry and preview install or channel operations.">
       <input className="input mb-4" placeholder="Search addons or statuses" value={search} onChange={(event) => setSearch(event.target.value)} />
       <div className="space-y-3">
-        {addons.map((addon) => (
+        {addons.map((addon) => {
+          const remoteUpdate = updates.get(addon.id)
+          return (
           <div key={addon.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <p className="font-semibold text-bronze-50">{addon.displayName}</p>
                 <p className="mt-1 text-sm text-bronze-100/60">{addon.installFolder} • {addon.currentVersion ?? 'Unresolved'} • {addon.currentChannel ?? addon.defaultChannel}</p>
+                {remoteUpdate ? (
+                  <p className="mt-2 text-sm text-bronze-100/55">
+                    Remote {remoteUpdate.channel}: {remoteUpdate.currentVersion ?? 'none'} -&gt; {remoteUpdate.latestVersion}
+                  </p>
+                ) : null}
               </div>
-              <StatusPill label={addon.health} tone={addon.health === 'Ready' ? 'ok' : 'warn'} />
+              <StatusPill label={remoteUpdate?.available ? 'update available' : addon.health} tone={remoteUpdate?.available ? 'warn' : addon.health === 'Ready' ? 'ok' : 'warn'} />
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
               <TinyButton label={addon.enabledInActiveProfile ? 'Update' : 'Install'} onClick={() => onInstall(addon.id)} />
+              <TinyButton label="Remote update" disabled={!remoteUpdate?.available} onClick={() => onRemoteUpdate(addon.id)} />
               <TinyButton label="Beta" onClick={() => onChannel(addon.id, 'beta')} />
               <TinyButton label="Local Dev" onClick={() => onChannel(addon.id, 'localDev')} />
               <TinyButton label="Isolate" onClick={() => onIsolate(addon.id)} />
               <TinyButton label="Remove" tone="danger" onClick={() => onRemove(addon.id)} />
             </div>
           </div>
-        ))}
+        )})}
       </div>
     </Panel>
   )
@@ -417,7 +577,21 @@ function RecoveryPanel({ snapshots, onRestore }: { snapshots: ScanStateResponse[
   )
 }
 
-function SettingsPanel({ draft, setDraft, detectedPaths, onDetect, onSave }: { draft: SaveSettingsRequest; setDraft: Dispatch<SetStateAction<SaveSettingsRequest>>; detectedPaths: DetectPathCandidate[]; onDetect: () => void; onSave: () => void }) {
+function SettingsPanel({
+  draft,
+  updates,
+  setDraft,
+  detectedPaths,
+  onDetect,
+  onSave,
+}: {
+  draft: SaveSettingsRequest
+  updates: UpdateCheckResponse | null
+  setDraft: Dispatch<SetStateAction<SaveSettingsRequest>>
+  detectedPaths: DetectPathCandidate[]
+  onDetect: () => void
+  onSave: () => void
+}) {
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_340px]">
       <Panel title="Path configuration" subtitle="Use detection when possible, then pin exact AddOns and SavedVariables paths.">
@@ -426,11 +600,28 @@ function SettingsPanel({ draft, setDraft, detectedPaths, onDetect, onSave }: { d
           <Field label="AddOns path"><input className="input" value={draft.addonsPath ?? ''} onChange={(event) => setDraft((current) => ({ ...current, addonsPath: event.target.value }))} /></Field>
           <Field label="SavedVariables path"><input className="input" value={draft.savedVariablesPath ?? ''} onChange={(event) => setDraft((current) => ({ ...current, savedVariablesPath: event.target.value }))} /></Field>
           <Field label="Retention"><input className="input" type="number" value={draft.backupRetentionCount ?? 20} onChange={(event) => setDraft((current) => ({ ...current, backupRetentionCount: Number(event.target.value) }))} /></Field>
+          <Field label="Update channel">
+            <select className="input !py-2" value={draft.updateChannel ?? 'stable'} onChange={(event) => setDraft((current) => ({ ...current, updateChannel: event.target.value as UpdateChannel }))}>
+              <option value="stable">Stable</option>
+              <option value="beta">Beta</option>
+            </select>
+          </Field>
+          <Field label="Last update check">
+            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-bronze-100/70">
+              {formatWhen(updates?.checkedAt ?? null)}
+            </div>
+          </Field>
+          {draft.devModeEnabled ? (
+            <Field label="Manifest override">
+              <input className="input" value={draft.updateManifestOverride ?? ''} onChange={(event) => setDraft((current) => ({ ...current, updateManifestOverride: event.target.value }))} placeholder="https://localhost:3000/manifest" />
+            </Field>
+          ) : null}
         </div>
         <div className="mt-5 flex flex-wrap gap-3">
           <button className="button-primary" onClick={onSave}>Save settings</button>
           <button className="button-secondary" onClick={onDetect}>Detect common installs</button>
         </div>
+        {updates?.errorMessage ? <p className="mt-4 text-sm text-amber-100">{updates.errorMessage}</p> : null}
       </Panel>
       <Panel title="Detected installs" subtitle="Apply a candidate to the draft settings with one click.">
         <div className="space-y-3">

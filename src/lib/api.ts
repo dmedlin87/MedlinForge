@@ -5,6 +5,7 @@ import type {
   ChangePreviewItem,
   CreateProfileRequest,
   DetectPathsResponse,
+  ManagerUpdateStatus,
   OperationResponse,
   ProfileRecord,
   RegisterSourceRequest,
@@ -12,6 +13,7 @@ import type {
   ScanStateResponse,
   SnapshotSummary,
   SyncProfileRequest,
+  UpdateCheckResponse,
 } from '../types'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -29,6 +31,10 @@ let demoState: ScanStateResponse = {
     autoBackupEnabled: true,
     defaultProfileId: 'profile-main',
     devModeEnabled: true,
+    updateChannel: 'stable',
+    lastUpdateCheckAt: new Date().toISOString(),
+    lastUpdateError: null,
+    updateManifestOverride: null,
   },
   addons: [
     {
@@ -135,6 +141,47 @@ let demoState: ScanStateResponse = {
   interruptedOperation: null,
 }
 
+let demoUpdates: UpdateCheckResponse = {
+  channel: 'stable',
+  checkedAt: new Date().toISOString(),
+  manifestGeneratedAt: new Date().toISOString(),
+  manifestUrl: 'https://dmedlin87.github.io/MedlinForge/manifest/stable.json',
+  stale: false,
+  errorMessage: null,
+  manager: {
+    id: 'bronzeforge-manager',
+    currentVersion: '0.1.0',
+    latestVersion: '0.2.0',
+    available: true,
+    status: 'available',
+    releaseUrl: 'https://github.com/dmedlin87/MedlinForge/releases/tag/v0.2.0',
+    packageUrl: 'https://github.com/dmedlin87/MedlinForge/releases/download/v0.2.0/bronzeforge-manager-windows-x64-installer.exe',
+    changelog: 'https://github.com/dmedlin87/MedlinForge/releases/tag/v0.2.0',
+    publishedAt: new Date().toISOString(),
+    downloadedInstallerPath: null,
+  },
+  addons: [
+    {
+      id: 'bronzeforge-ui',
+      name: 'BronzeForge UI',
+      type: 'addon',
+      channel: 'stable',
+      currentVersion: '1.4.2',
+      latestVersion: '1.5.0',
+      available: true,
+      status: 'available',
+      publishedAt: new Date().toISOString(),
+      releaseUrl: 'https://github.com/dmedlin87/BronzeForgeUI/releases/tag/v1.5.0',
+      packageUrl: 'https://github.com/dmedlin87/BronzeForgeUI/releases/download/v1.5.0/BronzeForgeUI.zip',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 456789,
+      installKind: 'addon-folder-zip',
+      changelog: 'https://github.com/dmedlin87/BronzeForgeUI/releases/tag/v1.5.0',
+      minManagerVersion: null,
+    },
+  ],
+}
+
 function getActiveProfile(): ProfileRecord {
   return demoState.profiles.find((profile) => profile.id === demoState.activeProfileId) ?? demoState.profiles[0]
 }
@@ -212,6 +259,9 @@ async function invokeOrDemo<T>(command: string, payload?: Record<string, unknown
             Object.entries((payload?.request ?? {}) as SaveSettingsRequest).filter(([, value]) => value !== null),
           ),
         },
+      }
+      if ((payload?.request as SaveSettingsRequest)?.updateChannel) {
+        demoUpdates = { ...demoUpdates, channel: (payload?.request as SaveSettingsRequest).updateChannel ?? demoUpdates.channel }
       }
       return clone(demoState) as T
     }
@@ -353,6 +403,64 @@ async function invokeOrDemo<T>(command: string, payload?: Record<string, unknown
       return 'C:\\Users\\demo\\AppData\\Roaming\\BronzeForge\\exports\\demo.zip' as T
     case 'promote_revision':
       return clone(demoState) as T
+    case 'check_updates':
+      demoState = {
+        ...demoState,
+        settings: {
+          ...demoState.settings,
+          lastUpdateCheckAt: new Date().toISOString(),
+          lastUpdateError: null,
+        },
+      }
+      demoUpdates = {
+        ...demoUpdates,
+        channel: demoState.settings.updateChannel,
+        checkedAt: demoState.settings.lastUpdateCheckAt,
+        manifestGeneratedAt: new Date().toISOString(),
+      }
+      return clone(demoUpdates) as T
+    case 'apply_remote_addon_update': {
+      const request = (payload?.request ?? {}) as { addonId: string; previewOnly?: boolean | null }
+      const target = demoUpdates.addons.find((addon) => addon.id === request.addonId)
+      if (target) {
+        demoState = {
+          ...demoState,
+          addons: demoState.addons.map((addon) =>
+            addon.id === target.id
+              ? { ...addon, currentVersion: target.latestVersion, currentChannel: target.channel }
+              : addon,
+          ),
+        }
+        demoUpdates = {
+          ...demoUpdates,
+          addons: demoUpdates.addons.map((addon) =>
+            addon.id === target.id
+              ? { ...addon, currentVersion: addon.latestVersion, available: false, status: 'up-to-date' }
+              : addon,
+          ),
+        }
+      }
+      return {
+        ...syncPreview(demoState.activeProfileId ?? 'profile-main'),
+        applied: !request.previewOnly,
+        message: request.previewOnly ? 'Remote addon update preview generated' : 'Remote addon update applied',
+      } as T
+    }
+    case 'install_manager_update': {
+      const manager = demoUpdates.manager
+      if (!manager) return null as T
+      demoUpdates = {
+        ...demoUpdates,
+        manager: {
+          ...manager,
+          currentVersion: manager.latestVersion,
+          available: false,
+          status: 'up-to-date',
+          downloadedInstallerPath: 'C:\\Users\\demo\\AppData\\Roaming\\BronzeForge\\staging\\manager-updates\\bronzeforge-manager-windows-x64-installer.exe',
+        },
+      }
+      return clone(demoUpdates.manager) as T
+    }
     default:
       return clone(demoState) as T
   }
@@ -378,4 +486,9 @@ export const api = {
   packageRevision: (request: { revisionId?: string | null; addonId?: string | null; channel?: Channel | null }) => invokeOrDemo<string>('package_revision', { request }),
   promoteRevision: (request: { revisionId: string }) => invokeOrDemo<ScanStateResponse>('promote_revision', { request }),
   listUnmanaged: () => invokeOrDemo<ScanStateResponse['unmanaged']>('list_unmanaged'),
+  checkUpdates: () => invokeOrDemo<UpdateCheckResponse>('check_updates'),
+  applyRemoteAddonUpdate: (request: { addonId: string; profileId?: string | null; previewOnly?: boolean | null }) =>
+    invokeOrDemo<OperationResponse>('apply_remote_addon_update', { request }),
+  installManagerUpdate: (request?: { productId?: string | null }) =>
+    invokeOrDemo<ManagerUpdateStatus>('install_manager_update', { request }),
 }

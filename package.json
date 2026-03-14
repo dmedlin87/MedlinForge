@@ -6,12 +6,14 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 1420 --strictPort",
     "build": "tsc -b && vite build",
+    "build:update-manifests": "node scripts/build-update-manifests.mjs",
     "doctor:windows": "node scripts/doctor-windows.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri:dev": "node scripts/tauri-runner.mjs dev",
     "tauri:build": "node scripts/tauri-runner.mjs build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:update-manifests": "node --test scripts/build-update-manifests.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

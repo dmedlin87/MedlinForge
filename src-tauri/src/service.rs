@@ -3,6 +3,8 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -11,6 +13,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 use walkdir::WalkDir;
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
@@ -18,15 +21,18 @@ use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 use crate::{
     manifest::{load_local_metadata, normalize_addon_root, read_manifest_file},
     models::{
-        AddonRecord, ChangeChannelRequest, ChangePreview, ChangePreviewItem, ChangeType, Channel,
-        CreateProfileRequest, DetectPathCandidate, DetectPathsResponse, DuplicateProfileRequest,
-        ImportZipRequest, InstallAddonRequest, LiveFolderState, OperationLogEntry,
+        AddonRecord, ApplyRemoteAddonUpdateRequest, ChangeChannelRequest, ChangePreview,
+        ChangePreviewItem, ChangeType, Channel, CreateProfileRequest, DetectPathCandidate,
+        DetectPathsResponse, DuplicateProfileRequest, ImportZipRequest, InstallAddonRequest,
+        InstallManagerUpdateRequest, LiveFolderState, ManagerUpdateStatus, OperationLogEntry,
         OperationResponse, PackageRevisionRequest, PendingOperationSummary, ProfileRecord,
         ProfileSelection, ProfileSelectionInput, PromoteRevisionRequest, RefreshSourceRequest,
-        RegisterSourceRequest, RestoreSnapshotRequest, RevisionSummary, SaveSettingsRequest,
-        ScanStateResponse, Settings, Severity, SnapshotSummary, SnapshotType, SourceKind,
-        SourceSummary, SwitchProfileRequest, SyncProfileRequest, ValidationIssue,
+        RegisterSourceRequest, RemoteProductType, RemoteProductUpdate, RestoreSnapshotRequest,
+        RevisionSummary, SaveSettingsRequest, ScanStateResponse, Settings, Severity,
+        SnapshotSummary, SnapshotType, SourceKind, SourceSummary, SwitchProfileRequest,
+        SyncProfileRequest, UpdateCheckResponse, UpdateChannel, ValidationIssue,
     },
+    update_provider::{RemoteManifestProduct, UpdateProvider},
 };
 
 pub type ServiceResult<T> = Result<T, ServiceError>;
@@ -51,7 +57,6 @@ pub enum ServiceError {
 
 #[derive(Debug, Clone)]
 struct Directories {
-    base: PathBuf,
     cache: PathBuf,
     staging: PathBuf,
     snapshots: PathBuf,
@@ -93,6 +98,14 @@ struct RevisionRow {
     checksum: String,
     metadata_json: String,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteProductCacheRow {
+    product_id: String,
+    channel: UpdateChannel,
+    payload_json: String,
+    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +153,8 @@ struct ProfilePreview {
 pub struct ManagerService {
     connection: Connection,
     directories: Directories,
+    app_handle: Option<AppHandle>,
+    update_provider: UpdateProvider,
 }
 
 impl ManagerService {
@@ -147,22 +162,21 @@ impl ManagerService {
         let base = app_handle.path().app_data_dir().map_err(|_| {
             ServiceError::Message("Could not resolve app data directory".to_string())
         })?;
-        Self::from_base_dir(base)
+        Self::from_base_dir(base, Some(app_handle.clone()))
     }
 
     #[cfg(test)]
     pub fn for_test(base: PathBuf) -> ServiceResult<Self> {
-        Self::from_base_dir(base)
+        Self::from_base_dir(base, None)
     }
 
-    fn from_base_dir(base: PathBuf) -> ServiceResult<Self> {
+    fn from_base_dir(base: PathBuf, app_handle: Option<AppHandle>) -> ServiceResult<Self> {
         let directories = Directories {
             cache: base.join("cache"),
             staging: base.join("staging"),
             snapshots: base.join("snapshots"),
             exports: base.join("exports"),
             db: base.join("db").join("bronze_forge.sqlite"),
-            base,
         };
         fs::create_dir_all(&directories.cache)?;
         fs::create_dir_all(&directories.staging)?;
@@ -175,6 +189,8 @@ impl ManagerService {
         let mut service = Self {
             connection,
             directories,
+            app_handle,
+            update_provider: UpdateProvider::new()?,
         };
         service.run_migrations()?;
         service.ensure_defaults()?;
@@ -256,6 +272,7 @@ impl ManagerService {
         request: SaveSettingsRequest,
     ) -> ServiceResult<ScanStateResponse> {
         let current = self.load_settings()?;
+        let dev_mode_enabled = request.dev_mode_enabled.unwrap_or(current.dev_mode_enabled);
         let root = request
             .ascension_root_path
             .or(current.ascension_root_path)
@@ -293,9 +310,22 @@ impl ManagerService {
         if let Some(saved_path) = saved_variables.as_ref() {
             fs::create_dir_all(saved_path)?;
         }
+        let requested_manifest_override = request
+            .update_manifest_override
+            .as_ref()
+            .map(|value| value.trim().to_string());
+        let update_manifest_override = if dev_mode_enabled {
+            match requested_manifest_override {
+                Some(value) if value.is_empty() => None,
+                Some(value) => Some(value),
+                None => current.update_manifest_override,
+            }
+        } else {
+            None
+        };
         self.connection.execute(
-            "INSERT INTO settings (id, ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO settings (id, ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, update_channel, update_manifest_override, last_update_check_at, last_update_error, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                ascension_root_path = excluded.ascension_root_path,
                addons_path = excluded.addons_path,
@@ -304,6 +334,10 @@ impl ManagerService {
                auto_backup_enabled = excluded.auto_backup_enabled,
                default_profile_id = excluded.default_profile_id,
                dev_mode_enabled = excluded.dev_mode_enabled,
+               update_channel = excluded.update_channel,
+               update_manifest_override = excluded.update_manifest_override,
+               last_update_check_at = excluded.last_update_check_at,
+               last_update_error = excluded.last_update_error,
                updated_at = excluded.updated_at",
             params![
                 root,
@@ -312,7 +346,14 @@ impl ManagerService {
                 request.backup_retention_count.unwrap_or(current.backup_retention_count),
                 request.auto_backup_enabled.unwrap_or(current.auto_backup_enabled) as i64,
                 request.default_profile_id.or(current.default_profile_id),
-                request.dev_mode_enabled.unwrap_or(current.dev_mode_enabled) as i64,
+                dev_mode_enabled as i64,
+                request
+                    .update_channel
+                    .unwrap_or(current.update_channel)
+                    .to_string(),
+                update_manifest_override,
+                current.last_update_check_at.map(|value| value.to_rfc3339()),
+                current.last_update_error,
                 now_string()
             ],
         )?;
@@ -767,6 +808,194 @@ impl ManagerService {
         self.list_unmanaged_in_path(Path::new(&addons_path))
     }
 
+    pub fn check_updates(&mut self) -> ServiceResult<UpdateCheckResponse> {
+        let settings = self.load_settings()?;
+        let (manifest_url, manifest_generated_at, remote_products, stale, error_message) =
+            match self.update_provider.fetch_manifest(&settings) {
+                Ok((manifest_url, manifest)) => {
+                    let products = manifest.products.into_values().collect::<Vec<_>>();
+                    self.cache_remote_products(manifest.channel, &products)?;
+                    self.record_update_check(Some(now_string()), None)?;
+                    (
+                        Some(manifest_url),
+                        Some(manifest.generated_at),
+                        products,
+                        false,
+                        None,
+                    )
+                }
+                Err(error) => {
+                    self.record_update_check(
+                        settings.last_update_check_at.map(|value| value.to_rfc3339()),
+                        Some(error.to_string()),
+                    )?;
+                    (
+                        None,
+                        None,
+                        self.load_cached_remote_products(settings.update_channel)?,
+                        true,
+                        Some(error.to_string()),
+                    )
+                }
+            };
+
+        let settings = self.load_settings()?;
+        let addons = self.load_addons()?;
+        let addon_map = addons
+            .into_iter()
+            .map(|addon| (addon.id.clone(), addon))
+            .collect::<HashMap<_, _>>();
+
+        let manager = remote_products
+            .iter()
+            .find(|product| product.product_type == RemoteProductType::Manager)
+            .map(|product| self.to_manager_update_status(product, None))
+            .transpose()?;
+
+        let mut addon_updates = remote_products
+            .iter()
+            .filter(|product| product.product_type == RemoteProductType::Addon)
+            .filter_map(|product| addon_map.get(&product.id).map(|addon| (product, addon)))
+            .map(|(product, addon)| self.to_remote_addon_update(&settings, addon, product))
+            .collect::<ServiceResult<Vec<_>>>()?;
+        addon_updates.sort_by(|left, right| left.name.cmp(&right.name));
+
+        Ok(UpdateCheckResponse {
+            channel: settings.update_channel,
+            checked_at: settings.last_update_check_at,
+            manifest_generated_at,
+            manifest_url,
+            stale,
+            error_message,
+            manager,
+            addons: addon_updates,
+        })
+    }
+
+    pub fn apply_remote_addon_update(
+        &mut self,
+        request: ApplyRemoteAddonUpdateRequest,
+    ) -> ServiceResult<OperationResponse> {
+        let _ = self.check_updates()?;
+        let settings = self.load_settings()?;
+        let product = self
+            .load_cached_remote_product(&request.addon_id, settings.update_channel)?
+            .ok_or_else(|| {
+                ServiceError::Message(format!(
+                    "No cached remote update found for '{}'",
+                    request.addon_id
+                ))
+            })?;
+        if product.product_type != RemoteProductType::Addon {
+            return Err(ServiceError::Message(format!(
+                "Product '{}' is not an addon",
+                product.id
+            )));
+        }
+        if !UpdateProvider::manager_version_satisfies(product.min_manager_version.as_deref()) {
+            return Err(ServiceError::Message(format!(
+                "{} requires BronzeForge Manager {} or newer",
+                product.name,
+                product.min_manager_version.unwrap_or_default()
+            )));
+        }
+        let addon = self.load_addon(&product.id)?;
+        let download_path = self
+            .directories
+            .staging
+            .join("remote-downloads")
+            .join(format!(
+                "{}-{}{}.zip",
+                product.id,
+                settings.update_channel.as_str(),
+                sanitize_version(&product.latest_version)
+            ));
+        self.update_provider
+            .download_verified_asset(&settings, &product, &download_path)?;
+        self.import_zip(ImportZipRequest {
+            path: download_path.to_string_lossy().to_string(),
+            channel: Some(update_channel_to_channel(settings.update_channel)),
+            core: Some(addon.is_core),
+        })?;
+        self.insert_log(
+            "downloadRemoteAddonUpdate",
+            "success",
+            &format!(
+                "Downloaded remote {} update {}",
+                product.name, product.latest_version
+            ),
+        )?;
+        self.update_addon(InstallAddonRequest {
+            addon_id: request.addon_id,
+            profile_id: request.profile_id,
+            preview_only: request.preview_only,
+        })
+    }
+
+    pub fn install_manager_update(
+        &mut self,
+        request: InstallManagerUpdateRequest,
+    ) -> ServiceResult<ManagerUpdateStatus> {
+        let _ = self.check_updates()?;
+        let settings = self.load_settings()?;
+        let product_id = request
+            .product_id
+            .unwrap_or_else(|| "bronzeforge-manager".to_string());
+        let product = self
+            .load_cached_remote_product(&product_id, settings.update_channel)?
+            .ok_or_else(|| {
+                ServiceError::Message(format!(
+                    "No cached manager update found for '{}'",
+                    product_id
+                ))
+            })?;
+        if product.product_type != RemoteProductType::Manager {
+            return Err(ServiceError::Message(format!(
+                "Product '{}' is not the desktop manager",
+                product.id
+            )));
+        }
+        let status = self.to_manager_update_status(&product, None)?;
+        if !status.available {
+            return Err(ServiceError::Message(
+                "BronzeForge Manager is already up to date".to_string(),
+            ));
+        }
+
+        let installer_name = Url::parse(&product.package_url)
+            .ok()
+            .and_then(|url| {
+                url.path_segments()
+                    .and_then(|mut segments| segments.next_back().map(str::to_string))
+            })
+            .unwrap_or_else(|| "bronzeforge-manager-installer.exe".to_string());
+        let installer_path = self
+            .directories
+            .staging
+            .join("manager-updates")
+            .join(installer_name);
+        let installer_path = self
+            .update_provider
+            .download_verified_asset(&settings, &product, &installer_path)?;
+        Command::new(&installer_path)
+            .spawn()
+            .map_err(|error| ServiceError::Message(format!("Failed to launch installer: {error}")))?;
+        self.insert_log(
+            "installManagerUpdate",
+            "success",
+            &format!("Launched BronzeForge Manager installer {}", product.latest_version),
+        )?;
+
+        if let Some(app_handle) = self.app_handle.clone() {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                app_handle.exit(0);
+            });
+        }
+
+        self.to_manager_update_status(&product, Some(installer_path.to_string_lossy().to_string()))
+    }
+
     pub fn scan_live_state(&mut self) -> ServiceResult<ScanStateResponse> {
         let settings = self.load_settings()?;
         let addons = self.load_addons()?;
@@ -912,6 +1141,11 @@ impl ManagerService {
         self.connection.execute_batch(
             "
             PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              applied_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS settings (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               ascension_root_path TEXT,
@@ -1005,6 +1239,51 @@ impl ManagerService {
               snapshot_id TEXT,
               started_at TEXT NOT NULL
             );",
+        )?;
+        self.apply_migration(
+            1,
+            "update_delivery_v1",
+            &[
+                "ALTER TABLE settings ADD COLUMN update_channel TEXT NOT NULL DEFAULT 'stable'",
+                "ALTER TABLE settings ADD COLUMN last_update_check_at TEXT",
+                "ALTER TABLE settings ADD COLUMN last_update_error TEXT",
+                "ALTER TABLE settings ADD COLUMN update_manifest_override TEXT",
+                "CREATE TABLE IF NOT EXISTS remote_products (
+                  product_id TEXT NOT NULL,
+                  channel TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  checked_at TEXT NOT NULL,
+                  PRIMARY KEY (product_id, channel)
+                )",
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn apply_migration(&mut self, id: i64, name: &str, statements: &[&str]) -> ServiceResult<()> {
+        let applied = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )?
+            > 0;
+        if applied {
+            return Ok(());
+        }
+        for statement in statements {
+            match self.connection.execute(statement, params![]) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                    if message.contains("duplicate column name")
+                        || message.contains("already exists") => {}
+                Err(error) => return Err(ServiceError::from(error)),
+            }
+        }
+        self.connection.execute(
+            "INSERT INTO schema_migrations (id, name, applied_at) VALUES (?1, ?2, ?3)",
+            params![id, name, now_string()],
         )?;
         Ok(())
     }
@@ -1714,7 +1993,7 @@ impl ManagerService {
 
     fn load_settings(&self) -> ServiceResult<Settings> {
         Ok(self.connection.query_row(
-            "SELECT ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled FROM settings WHERE id = 1",
+            "SELECT ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, update_channel, last_update_check_at, last_update_error, update_manifest_override FROM settings WHERE id = 1",
             params![],
             |row| {
                 Ok(Settings {
@@ -1725,9 +2004,183 @@ impl ManagerService {
                     auto_backup_enabled: row.get::<_, i64>(4)? != 0,
                     default_profile_id: row.get(5)?,
                     dev_mode_enabled: row.get::<_, i64>(6)? != 0,
+                    update_channel: row
+                        .get::<_, String>(7)?
+                        .parse::<UpdateChannel>()
+                        .map_err(string_to_sql_error)?,
+                    last_update_check_at: row
+                        .get::<_, Option<String>>(8)?
+                        .map(|value| parse_timestamp(&value).map_err(string_to_sql_error))
+                        .transpose()?,
+                    last_update_error: row.get(9)?,
+                    update_manifest_override: row.get(10)?,
                 })
             },
         )?)
+    }
+
+    fn record_update_check(
+        &self,
+        checked_at: Option<String>,
+        error_message: Option<String>,
+    ) -> ServiceResult<()> {
+        self.connection.execute(
+            "UPDATE settings
+             SET last_update_check_at = COALESCE(?1, last_update_check_at),
+                 last_update_error = ?2,
+                 updated_at = ?3
+             WHERE id = 1",
+            params![checked_at, error_message, now_string()],
+        )?;
+        Ok(())
+    }
+
+    fn cache_remote_products(
+        &mut self,
+        channel: UpdateChannel,
+        products: &[RemoteManifestProduct],
+    ) -> ServiceResult<()> {
+        self.connection.execute(
+            "DELETE FROM remote_products WHERE channel = ?1",
+            params![channel.to_string()],
+        )?;
+        for product in products {
+            self.connection.execute(
+                "INSERT INTO remote_products (product_id, channel, payload_json, checked_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    &product.id,
+                    channel.to_string(),
+                    serde_json::to_string(product)?,
+                    now_string()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn load_cached_remote_products(
+        &self,
+        channel: UpdateChannel,
+    ) -> ServiceResult<Vec<RemoteManifestProduct>> {
+        let mut statement = self.connection.prepare(
+            "SELECT product_id, channel, payload_json, checked_at
+             FROM remote_products
+             WHERE channel = ?1
+             ORDER BY product_id COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(params![channel.to_string()], |row| {
+            Ok(RemoteProductCacheRow {
+                product_id: row.get(0)?,
+                channel: row
+                    .get::<_, String>(1)?
+                    .parse::<UpdateChannel>()
+                    .map_err(string_to_sql_error)?,
+                payload_json: row.get(2)?,
+                checked_at: parse_timestamp(&row.get::<_, String>(3)?)
+                    .map_err(string_to_sql_error)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(ServiceError::from)?
+            .into_iter()
+            .map(|row| {
+                let product =
+                    serde_json::from_str::<RemoteManifestProduct>(&row.payload_json)?;
+                if product.id != row.product_id || product.channel != row.channel {
+                    return Err(ServiceError::Message(format!(
+                        "Cached remote product '{}' is inconsistent",
+                        row.product_id
+                    )));
+                }
+                let _ = row.checked_at;
+                Ok(product)
+            })
+            .collect()
+    }
+
+    fn load_cached_remote_product(
+        &self,
+        product_id: &str,
+        channel: UpdateChannel,
+    ) -> ServiceResult<Option<RemoteManifestProduct>> {
+        Ok(self
+            .load_cached_remote_products(channel)?
+            .into_iter()
+            .find(|product| product.id == product_id))
+    }
+
+    fn to_manager_update_status(
+        &self,
+        product: &RemoteManifestProduct,
+        downloaded_installer_path: Option<String>,
+    ) -> ServiceResult<ManagerUpdateStatus> {
+        Ok(ManagerUpdateStatus {
+            id: product.id.clone(),
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: product.latest_version.clone(),
+            available: UpdateProvider::is_remote_newer(
+                &product.latest_version,
+                Some(env!("CARGO_PKG_VERSION")),
+            ),
+            status: if UpdateProvider::is_remote_newer(
+                &product.latest_version,
+                Some(env!("CARGO_PKG_VERSION")),
+            ) {
+                "available".to_string()
+            } else {
+                "up-to-date".to_string()
+            },
+            release_url: product.release_url.clone(),
+            package_url: product.package_url.clone(),
+            changelog: product.changelog.clone(),
+            published_at: product.published_at.clone(),
+            downloaded_installer_path,
+        })
+    }
+
+    fn to_remote_addon_update(
+        &self,
+        settings: &Settings,
+        addon: &AddonRow,
+        product: &RemoteManifestProduct,
+    ) -> ServiceResult<RemoteProductUpdate> {
+        let current_version = self
+            .latest_revision_for_channel(&addon.id, update_channel_to_channel(settings.update_channel))?
+            .map(|revision| revision.version);
+        let min_manager_satisfied =
+            UpdateProvider::manager_version_satisfies(product.min_manager_version.as_deref());
+        let available =
+            min_manager_satisfied
+                && UpdateProvider::is_remote_newer(
+                    &product.latest_version,
+                    current_version.as_deref(),
+                );
+        let status = if !min_manager_satisfied {
+            "requires-manager-update"
+        } else if available {
+            "available"
+        } else {
+            "up-to-date"
+        };
+        Ok(RemoteProductUpdate {
+            id: product.id.clone(),
+            name: product.name.clone(),
+            product_type: product.product_type,
+            channel: product.channel,
+            current_version,
+            latest_version: product.latest_version.clone(),
+            available,
+            status: status.to_string(),
+            published_at: product.published_at.clone(),
+            release_url: product.release_url.clone(),
+            package_url: product.package_url.clone(),
+            sha256: product.sha256.clone(),
+            size_bytes: product.size_bytes,
+            install_kind: product.install_kind.clone(),
+            changelog: product.changelog.clone(),
+            min_manager_version: product.min_manager_version.clone(),
+        })
     }
 
     fn load_addons(&self) -> ServiceResult<Vec<AddonRow>> {
@@ -2083,6 +2536,17 @@ fn resolve_relative_path(base: &Path, candidate: &str) -> PathBuf {
     }
 }
 
+fn update_channel_to_channel(channel: UpdateChannel) -> Channel {
+    match channel {
+        UpdateChannel::Stable => Channel::Stable,
+        UpdateChannel::Beta => Channel::Beta,
+    }
+}
+
+fn sanitize_version(value: &str) -> String {
+    format!("-{}", value.replace(|character: char| !character.is_ascii_alphanumeric(), "-"))
+}
+
 fn normalize_display_path(value: String) -> String {
     value.trim().trim_matches('"').to_string()
 }
@@ -2212,6 +2676,26 @@ mod tests {
         let addon_root = make_addon(temp.path(), "BronzeForgeUI", "BronzeForge UI", "1.0.0");
         let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
         service
+            .save_settings(SaveSettingsRequest {
+                ascension_root_path: None,
+                addons_path: Some(temp.path().join("live").to_string_lossy().to_string()),
+                saved_variables_path: Some(
+                    temp.path()
+                        .join("WTF")
+                        .join("Account")
+                        .join("SavedVariables")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                backup_retention_count: None,
+                auto_backup_enabled: None,
+                default_profile_id: None,
+                dev_mode_enabled: None,
+                update_channel: None,
+                update_manifest_override: None,
+            })
+            .unwrap();
+        service
             .register_source(RegisterSourceRequest {
                 source_kind: SourceKind::LocalFolder,
                 path: addon_root.to_string_lossy().to_string(),
@@ -2252,6 +2736,8 @@ mod tests {
                 auto_backup_enabled: None,
                 default_profile_id: None,
                 dev_mode_enabled: None,
+                update_channel: None,
+                update_manifest_override: None,
             })
             .unwrap();
         service

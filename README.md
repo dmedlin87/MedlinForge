@@ -15,6 +15,15 @@ Windows-first desktop addon manager for Project Ascension Bronzebeard addon suit
 - Managed/unmanaged AddOns boundary: unmanaged folders are surfaced but not auto-adopted or deleted
 - Recovery snapshots plus last-known-good snapshot creation after successful sync
 - Developer utilities for packaging revisions and promoting Beta to Stable
+- GitHub-based update delivery for owned products: GitHub Pages manifests, GitHub Releases assets, and checksum-verified downloads in the desktop app
+
+## Update Publishing
+
+- Product metadata lives in [`products/catalog.json`](/Users/dmedl/Projects/MedlinForge/products/catalog.json)
+- The manifest builder lives in [`scripts/build-update-manifests.mjs`](/Users/dmedl/Projects/MedlinForge/scripts/build-update-manifests.mjs)
+- GitHub Pages publication is defined in [`.github/workflows/publish-update-manifests.yml`](/Users/dmedl/Projects/MedlinForge/.github/workflows/publish-update-manifests.yml)
+- The manager release workflow is defined in [`.github/workflows/manager-release.yml`](/Users/dmedl/Projects/MedlinForge/.github/workflows/manager-release.yml)
+- Owned addon repos should follow [`docs/addon_release_contract.md`](/Users/dmedl/Projects/MedlinForge/docs/addon_release_contract.md)
 
 ## Distribution Target
 
@@ -31,8 +40,10 @@ BronzeForge Manager should ship to end users as a simple Windows install, not as
 - `npm run doctor:windows`: verify Windows builder prerequisites before running Tauri
 - `npm run tauri:dev`: run the desktop shell against the Vite dev server
 - `npm run build`: TypeScript check plus production frontend build
+- `npm run build:update-manifests`: generate `site/manifest/stable.json` and `site/manifest/beta.json` from GitHub releases
 - `npm run tauri:build`: produce a packaged Windows installer build
 - `npm run test`: Vitest UI smoke coverage
+- `npm run test:update-manifests`: validate the manifest builder against release-selection and schema edge cases
 - `npm run lint`: ESLint
 
 ## Builder Vs End User Requirements

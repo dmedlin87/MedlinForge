@@ -1,7 +1,9 @@
 export type Channel = 'stable' | 'beta' | 'localDev'
+export type UpdateChannel = 'stable' | 'beta'
 export type SourceKind = 'local-folder' | 'zip-file' | 'manifest'
 export type Severity = 'blocker' | 'warning'
 export type ChangeType = 'install' | 'update' | 'reinstall' | 'remove'
+export type RemoteProductType = 'manager' | 'addon'
 
 export interface Settings {
   ascensionRootPath: string | null
@@ -11,6 +13,10 @@ export interface Settings {
   autoBackupEnabled: boolean
   defaultProfileId: string | null
   devModeEnabled: boolean
+  updateChannel: UpdateChannel
+  lastUpdateCheckAt: string | null
+  lastUpdateError: string | null
+  updateManifestOverride: string | null
 }
 
 export interface SourceSummary {
@@ -166,6 +172,8 @@ export interface SaveSettingsRequest {
   autoBackupEnabled?: boolean | null
   defaultProfileId?: string | null
   devModeEnabled?: boolean | null
+  updateChannel?: UpdateChannel | null
+  updateManifestOverride?: string | null
 }
 
 export interface RegisterSourceRequest {
@@ -187,4 +195,47 @@ export interface SyncProfileRequest {
   previewOnly?: boolean | null
   safeMode?: boolean | null
   isolateAddonId?: string | null
+}
+
+export interface RemoteProductUpdate {
+  id: string
+  name: string
+  type: RemoteProductType
+  channel: UpdateChannel
+  currentVersion: string | null
+  latestVersion: string
+  available: boolean
+  status: string
+  publishedAt: string
+  releaseUrl: string
+  packageUrl: string
+  sha256: string
+  sizeBytes: number
+  installKind: string | null
+  changelog: string | null
+  minManagerVersion: string | null
+}
+
+export interface ManagerUpdateStatus {
+  id: string
+  currentVersion: string
+  latestVersion: string
+  available: boolean
+  status: string
+  releaseUrl: string
+  packageUrl: string
+  changelog: string | null
+  publishedAt: string
+  downloadedInstallerPath: string | null
+}
+
+export interface UpdateCheckResponse {
+  channel: UpdateChannel
+  checkedAt: string | null
+  manifestGeneratedAt: string | null
+  manifestUrl: string | null
+  stale: boolean
+  errorMessage: string | null
+  manager: ManagerUpdateStatus | null
+  addons: RemoteProductUpdate[]
 }
