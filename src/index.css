@@ -23,13 +23,40 @@ body {
 }
 
 .input {
-  @apply w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-bronze-50 outline-none transition placeholder:text-bronze-100/35 focus:border-bronze-300/35 focus:bg-black/35;
+  @apply w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-bronze-50 outline-none transition placeholder:text-bronze-100/35 focus:border-bronze-300/35 focus:bg-black/35 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze-300/60;
 }
 
 .button-primary {
-  @apply rounded-2xl bg-bronze-400 px-5 py-3 text-sm font-semibold text-[#20130c] transition hover:bg-bronze-300;
+  @apply rounded-2xl bg-bronze-400 px-5 py-3 text-sm font-semibold text-[#20130c] transition hover:bg-bronze-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze-300 disabled:cursor-not-allowed disabled:opacity-40;
 }
 
 .button-secondary {
-  @apply rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-bronze-50 transition hover:bg-white/10;
+  @apply rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-bronze-50 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze-300 disabled:cursor-not-allowed disabled:opacity-40;
+}
+
+/* Toast slide-in animation */
+@keyframes slide-in-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-in {
+  animation: slide-in-from-right 0.2s ease-out;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  .animate-in,
+  .animate-spin {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
 }
