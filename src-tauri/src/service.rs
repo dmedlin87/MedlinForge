@@ -199,11 +199,10 @@ impl ManagerService {
 
     pub fn detect_paths(&mut self) -> ServiceResult<DetectPathsResponse> {
         let settings = self.load_settings()?;
-        let mut candidates = Vec::new();
-        let mut seen = HashSet::new();
         let mut roots = vec![
             PathBuf::from(r"C:\Ascension"),
             PathBuf::from(r"C:\Games"),
+            PathBuf::from(r"D:\Games"),
             PathBuf::from(r"C:\Program Files"),
             PathBuf::from(r"C:\Program Files (x86)"),
         ];
@@ -214,53 +213,8 @@ impl ManagerService {
             roots.push(PathBuf::from(user_profile).join("Games"));
         }
 
-        for root in roots {
-            if !root.exists() {
-                continue;
-            }
-            for addons_path in [
-                root.join("Ascension").join("Interface").join("AddOns"),
-                root.join("Project Ascension")
-                    .join("Interface")
-                    .join("AddOns"),
-                root.join("Ascension Launcher")
-                    .join("game")
-                    .join("Interface")
-                    .join("AddOns"),
-            ] {
-                if !addons_path.exists() {
-                    continue;
-                }
-                let key = addons_path.to_string_lossy().to_string();
-                if !seen.insert(key) {
-                    continue;
-                }
-                let ascension_root = addons_path
-                    .parent()
-                    .and_then(Path::parent)
-                    .unwrap_or(&addons_path)
-                    .to_path_buf();
-                let saved_variables = ascension_root
-                    .join("WTF")
-                    .join("Account")
-                    .join("SavedVariables");
-                candidates.push(DetectPathCandidate {
-                    label: ascension_root
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("Detected install")
-                        .to_string(),
-                    confidence: if saved_variables.exists() {
-                        "high".to_string()
-                    } else {
-                        "medium".to_string()
-                    },
-                    ascension_root_path: ascension_root.to_string_lossy().to_string(),
-                    addons_path: addons_path.to_string_lossy().to_string(),
-                    saved_variables_path: saved_variables.to_string_lossy().to_string(),
-                });
-            }
-        }
+        let candidates = detect_path_candidates(&roots)?;
+
         Ok(DetectPathsResponse {
             candidates,
             settings,
@@ -1477,9 +1431,7 @@ impl ManagerService {
         isolate_addon_id: Option<String>,
     ) -> ServiceResult<ProfilePreview> {
         let settings = self.load_settings()?;
-        let addons_path = settings.addons_path.clone().ok_or_else(|| {
-            ServiceError::Message("Set the AddOns path before syncing a profile".to_string())
-        })?;
+        let addons_path = settings.addons_path.clone();
         let saved_variables_path = settings.saved_variables_path.clone();
         let profile = self.load_profile(profile_id)?;
         let selections = self.load_profile_selections(&profile.id)?;
@@ -1488,11 +1440,22 @@ impl ManagerService {
             .into_iter()
             .map(|addon| (addon.id.clone(), addon))
             .collect::<HashMap<_, _>>();
-        let live_folders = self.scan_live_addons(Path::new(&addons_path))?;
         let mut blockers = Vec::new();
         let mut warnings = Vec::new();
         let mut installs = Vec::new();
         let mut saved_variables = HashSet::new();
+        let live_folders = if let Some(addons_path) = addons_path.as_ref() {
+            self.scan_live_addons(Path::new(addons_path))?
+        } else {
+            blockers.push(issue(
+                "missing_addons_path",
+                Severity::Blocker,
+                "Set the AddOns path before syncing a profile.",
+                None,
+                None,
+            ));
+            Vec::new()
+        };
         let enabled = selections
             .into_iter()
             .filter(|selection| selection.enabled)
@@ -1613,7 +1576,10 @@ impl ManagerService {
                 ));
                 continue;
             }
-            let target_path = Path::new(&addons_path).join(&addon.install_folder);
+            let Some(addons_path) = addons_path.as_ref() else {
+                continue;
+            };
+            let target_path = Path::new(addons_path).join(&addon.install_folder);
             if let Some(live) = live_folders
                 .iter()
                 .find(|folder| folder.name == addon.install_folder && !folder.managed)
@@ -1651,23 +1617,29 @@ impl ManagerService {
             .filter_map(|addon_id| addon_map.get(addon_id))
             .map(|addon| addon.install_folder.clone())
             .collect::<HashSet<_>>();
-        let removals = live_folders
-            .iter()
-            .filter_map(|folder| {
-                if folder.managed && !desired_folders.contains(&folder.name) {
-                    folder
-                        .addon_id
-                        .as_ref()
-                        .and_then(|addon_id| addon_map.get(addon_id))
-                        .map(|addon| RemovalPlan {
-                            addon: addon.clone(),
-                            target_path: Path::new(&addons_path).join(&addon.install_folder),
-                        })
-                } else {
-                    None
-                }
+        let removals = addons_path
+            .as_ref()
+            .map(|addons_path| {
+                live_folders
+                    .iter()
+                    .filter_map(|folder| {
+                        if folder.managed && !desired_folders.contains(&folder.name) {
+                            folder
+                                .addon_id
+                                .as_ref()
+                                .and_then(|addon_id| addon_map.get(addon_id))
+                                .map(|addon| RemovalPlan {
+                                    addon: addon.clone(),
+                                    target_path: Path::new(addons_path)
+                                        .join(&addon.install_folder),
+                                })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         match saved_variables_path {
             Some(path) if Path::new(&path).exists() => {
                 for install in &installs {
@@ -2547,6 +2519,120 @@ fn sanitize_version(value: &str) -> String {
     format!("-{}", value.replace(|character: char| !character.is_ascii_alphanumeric(), "-"))
 }
 
+fn detect_path_candidates(roots: &[PathBuf]) -> ServiceResult<Vec<DetectPathCandidate>> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+
+        for addons_path in [
+            root.join("Ascension").join("Interface").join("AddOns"),
+            root.join("Project Ascension")
+                .join("Interface")
+                .join("AddOns"),
+            root.join("Ascension Launcher")
+                .join("game")
+                .join("Interface")
+                .join("AddOns"),
+        ] {
+            push_detect_candidate(&mut candidates, &mut seen, &addons_path);
+        }
+
+        let launcher_root = if path_name_eq(root, "Ascension Launcher") {
+            root.to_path_buf()
+        } else {
+            root.join("Ascension Launcher")
+        };
+        let resources_path = launcher_root.join("resources");
+
+        if resources_path.exists() {
+            for addons_path in find_launcher_addon_dirs(&resources_path)? {
+                push_detect_candidate(&mut candidates, &mut seen, &addons_path);
+            }
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn find_launcher_addon_dirs(resources_path: &Path) -> ServiceResult<Vec<PathBuf>> {
+    let mut addon_dirs = Vec::new();
+
+    for entry in WalkDir::new(resources_path).min_depth(3).max_depth(3) {
+        let entry = entry?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        let path = entry.path();
+        if !path_name_eq(path, "AddOns") {
+            continue;
+        }
+
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if !path_name_eq(parent, "Interface") {
+            continue;
+        }
+
+        addon_dirs.push(path.to_path_buf());
+    }
+
+    Ok(addon_dirs)
+}
+
+fn push_detect_candidate(
+    candidates: &mut Vec<DetectPathCandidate>,
+    seen: &mut HashSet<String>,
+    addons_path: &Path,
+) {
+    if !addons_path.exists() {
+        return;
+    }
+
+    let key = addons_path.to_string_lossy().to_string();
+    if !seen.insert(key) {
+        return;
+    }
+
+    let ascension_root = addons_path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(addons_path)
+        .to_path_buf();
+    let saved_variables = ascension_root
+        .join("WTF")
+        .join("Account")
+        .join("SavedVariables");
+
+    candidates.push(DetectPathCandidate {
+        label: ascension_root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Detected install")
+            .to_string(),
+        confidence: if saved_variables.exists() {
+            "high".to_string()
+        } else {
+            "medium".to_string()
+        },
+        ascension_root_path: ascension_root.to_string_lossy().to_string(),
+        addons_path: addons_path.to_string_lossy().to_string(),
+        saved_variables_path: saved_variables.to_string_lossy().to_string(),
+    });
+}
+
+fn path_name_eq(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
 fn normalize_display_path(value: String) -> String {
     value.trim().trim_matches('"').to_string()
 }
@@ -2653,7 +2739,7 @@ fn zip_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::ManagerService;
+    use super::{detect_path_candidates, ManagerService};
     use crate::models::{
         Channel, RegisterSourceRequest, SaveSettingsRequest, SourceKind, SyncProfileRequest,
     };
@@ -2769,5 +2855,40 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "missing_dependency")
         );
+    }
+
+    #[test]
+    fn detect_paths_finds_launcher_resource_clients() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = temp
+            .path()
+            .join("Program Files")
+            .join("Ascension Launcher")
+            .join("resources");
+
+        for client in ["client", "epoch_live"] {
+            let root = launcher.join(client);
+            fs::create_dir_all(root.join("Interface").join("AddOns")).unwrap();
+            fs::create_dir_all(root.join("WTF").join("Account").join("SavedVariables"))
+                .unwrap();
+        }
+
+        let candidates =
+            detect_path_candidates(&[temp.path().join("Program Files")]).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.label == "client"
+                && candidate
+                    .addons_path
+                    .ends_with("client\\Interface\\AddOns")
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.label == "epoch_live"
+                && candidate.confidence == "high"
+                && candidate
+                    .saved_variables_path
+                    .ends_with("epoch_live\\WTF\\Account\\SavedVariables")
+        }));
     }
 }

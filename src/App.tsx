@@ -80,6 +80,15 @@ function App() {
   const selectedProfile = state?.profiles.find((profile) => profile.id === selectedProfileId) ?? null
   const updateByAddonId = new Map((updates?.addons ?? []).map((item) => [item.id, item]))
 
+  const reportActionError = useCallback(
+    (caught: unknown, fallbackMessage: string) => {
+      const message = caught instanceof Error ? caught.message : fallbackMessage
+      setError(message)
+      addToast(message, 'error')
+    },
+    [addToast],
+  )
+
   function applyState(next: ScanStateResponse, preferredProfileId?: string | null) {
     startTransition(() => {
       setState(next)
@@ -182,9 +191,14 @@ function App() {
   }, [preflightOpen])
 
   async function preview(title: string, applyLabel: string, loadPreview: () => Promise<OperationResponse>, apply: () => Promise<void>) {
-    const response = await loadPreview()
-    setPendingOperation({ title, applyLabel, response, apply })
-    setPreflightOpen(true)
+    try {
+      setError(null)
+      const response = await loadPreview()
+      setPendingOperation({ title, applyLabel, response, apply })
+      setPreflightOpen(true)
+    } catch (caught) {
+      reportActionError(caught, 'Failed to generate preview.')
+    }
   }
 
   async function previewSync(profileId: string, safeMode = false, isolateAddonId: string | null = null, switchAfter = false) {
@@ -267,35 +281,59 @@ function App() {
   }
 
   async function saveSettings() {
-    applyState(await api.saveSettings(settingsDraft), selectedProfileId)
-    await refreshUpdates()
-    addToast('Settings saved.')
-    addToast('Settings saved.')
+    try {
+      setError(null)
+      applyState(await api.saveSettings(settingsDraft), selectedProfileId)
+      await refreshUpdates()
+      addToast('Settings saved.')
+    } catch (caught) {
+      reportActionError(caught, 'Failed to save settings.')
+    }
   }
 
   async function detectPaths() {
-    const response = await api.detectPaths()
-    setDetectedPaths(response.candidates)
-    addToast(`Found ${response.candidates.length} install${response.candidates.length === 1 ? '' : 's'}.`)
+    try {
+      setError(null)
+      const response = await api.detectPaths()
+      setDetectedPaths(response.candidates)
+      addToast(`Found ${response.candidates.length} install${response.candidates.length === 1 ? '' : 's'}.`)
+    } catch (caught) {
+      reportActionError(caught, 'Failed to detect game paths.')
+    }
   }
 
   async function registerSource() {
     if (!sourceDraft.path.trim()) return
-    applyState(await api.registerSource(sourceDraft), selectedProfileId)
-    setSourceDraft((current) => ({ ...current, path: '' }))
-    addToast('Source registered.')
+    try {
+      setError(null)
+      applyState(await api.registerSource(sourceDraft), selectedProfileId)
+      setSourceDraft((current) => ({ ...current, path: '' }))
+      addToast('Source registered.')
+    } catch (caught) {
+      reportActionError(caught, 'Failed to register source.')
+    }
   }
 
   async function saveProfile(profileId?: string | null) {
     if (!profileName.trim()) return
-    const payload: CreateProfileRequest = { profileId, name: profileName.trim(), notes: profileNotes, selections: profileSelections }
-    applyState(await api.createProfile(payload), profileId ?? selectedProfileId)
-    addToast(profileId ? 'Profile saved.' : 'Profile created.')
+    try {
+      setError(null)
+      const payload: CreateProfileRequest = { profileId, name: profileName.trim(), notes: profileNotes, selections: profileSelections }
+      applyState(await api.createProfile(payload), profileId ?? selectedProfileId)
+      addToast(profileId ? 'Profile saved.' : 'Profile created.')
+    } catch (caught) {
+      reportActionError(caught, profileId ? 'Failed to save profile.' : 'Failed to create profile.')
+    }
   }
 
   async function duplicateProfile(profileId: string) {
-    applyState(await api.duplicateProfile({ profileId }), selectedProfileId)
-    addToast('Profile duplicated.')
+    try {
+      setError(null)
+      applyState(await api.duplicateProfile({ profileId }), selectedProfileId)
+      addToast('Profile duplicated.')
+    } catch (caught) {
+      reportActionError(caught, 'Failed to duplicate profile.')
+    }
   }
 
   function updateSelection(addonId: string, patch: Partial<ProfileSelection>) {
@@ -303,16 +341,26 @@ function App() {
   }
 
   async function packageAddon(addon: AddonRecord) {
-    setExportPath(await api.packageRevision({ addonId: addon.id, channel: addon.currentChannel ?? addon.defaultChannel }))
-    addToast('Package exported.')
+    try {
+      setError(null)
+      setExportPath(await api.packageRevision({ addonId: addon.id, channel: addon.currentChannel ?? addon.defaultChannel }))
+      addToast('Package exported.')
+    } catch (caught) {
+      reportActionError(caught, 'Failed to export addon package.')
+    }
   }
 
   async function promoteBeta(addon: AddonRecord) {
     const beta = addon.latestRevisions.find((revision) => revision.channel === 'beta')
     if (!beta) return
-    applyState(await api.promoteRevision({ revisionId: beta.id }), selectedProfileId)
-    await refreshUpdates()
-    addToast('Beta promoted to stable.')
+    try {
+      setError(null)
+      applyState(await api.promoteRevision({ revisionId: beta.id }), selectedProfileId)
+      await refreshUpdates()
+      addToast('Beta promoted to stable.')
+    } catch (caught) {
+      reportActionError(caught, 'Failed to promote beta revision.')
+    }
   }
 
   async function previewRemoteAddonUpdate(addonId: string) {
