@@ -226,9 +226,7 @@ export function buildManifests({ catalog, releaseIndex, assetDigests, generatedA
     const packs = {}
     for (const pack of [...catalog.packs].sort((left, right) => left.packId.localeCompare(right.packId))) {
       const members = pack.members.filter((member) => Boolean(products[member.productId]))
-      if (!members.length) {
-        fail(`Pack '${pack.packId}' has no members available on channel '${channel}'`)
-      }
+      if (!members.length) continue
       packs[pack.packId] = {
         packId: pack.packId,
         name: pack.name,
