@@ -173,6 +173,10 @@ pub struct Settings {
     pub auto_backup_enabled: bool,
     pub default_profile_id: Option<String>,
     pub dev_mode_enabled: bool,
+    pub maintainer_mode_enabled: bool,
+    pub onboarding_completed: bool,
+    pub selected_pack_id: Option<String>,
+    pub game_executable_path: Option<String>,
     pub update_channel: UpdateChannel,
     pub last_update_check_at: Option<DateTime<Utc>>,
     pub last_update_error: Option<String>,
@@ -188,7 +192,11 @@ impl Default for Settings {
             backup_retention_count: 20,
             auto_backup_enabled: true,
             default_profile_id: None,
-            dev_mode_enabled: true,
+            dev_mode_enabled: false,
+            maintainer_mode_enabled: false,
+            onboarding_completed: false,
+            selected_pack_id: None,
+            game_executable_path: None,
             update_channel: UpdateChannel::Stable,
             last_update_check_at: None,
             last_update_error: None,
@@ -376,6 +384,89 @@ pub struct ScanStateResponse {
     pub interrupted_operation: Option<PendingOperationSummary>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LauncherSetupStatus {
+    SetupRequired,
+    ReadyToInstall,
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackStatus {
+    ReadyToInstall,
+    Syncing,
+    UpToDate,
+    UpdateAvailable,
+    RecoveryNeeded,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LauncherActionState {
+    Idle,
+    Running,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherPackMember {
+    pub addon_id: String,
+    pub display_name: String,
+    pub install_folder: String,
+    pub required: bool,
+    pub installed: bool,
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CuratedPackSummary {
+    pub pack_id: String,
+    pub name: String,
+    pub description: String,
+    pub default_channel: Channel,
+    pub recovery_label: Option<String>,
+    pub recovery_description: Option<String>,
+    pub installed_count: usize,
+    pub total_count: usize,
+    pub members: Vec<LauncherPackMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherPathHealth {
+    pub configured: bool,
+    pub ascension_root_path: Option<String>,
+    pub addons_path: Option<String>,
+    pub saved_variables_path: Option<String>,
+    pub game_executable_path: Option<String>,
+    pub detected_candidates: Vec<DetectPathCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherStateResponse {
+    pub settings: Settings,
+    pub setup_status: LauncherSetupStatus,
+    pub pack_status: PackStatus,
+    pub action_state: LauncherActionState,
+    pub pack: Option<CuratedPackSummary>,
+    pub path_health: LauncherPathHealth,
+    pub updates_available: usize,
+    pub last_successful_sync_at: Option<DateTime<Utc>>,
+    pub last_known_good_snapshot: Option<SnapshotSummary>,
+    pub recovery_snapshots: Vec<SnapshotSummary>,
+    pub unmanaged_collisions: Vec<LiveFolderState>,
+    pub interrupted_operation: Option<PendingOperationSummary>,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveSettingsRequest {
@@ -386,8 +477,34 @@ pub struct SaveSettingsRequest {
     pub auto_backup_enabled: Option<bool>,
     pub default_profile_id: Option<String>,
     pub dev_mode_enabled: Option<bool>,
+    pub maintainer_mode_enabled: Option<bool>,
+    pub onboarding_completed: Option<bool>,
+    pub selected_pack_id: Option<String>,
+    pub game_executable_path: Option<String>,
     pub update_channel: Option<UpdateChannel>,
     pub update_manifest_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInitialSetupRequest {
+    pub ascension_root_path: Option<String>,
+    pub addons_path: Option<String>,
+    pub saved_variables_path: Option<String>,
+    pub game_executable_path: Option<String>,
+    pub selected_pack_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreLastKnownGoodRequest {
+    pub preview_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMaintainerModeRequest {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

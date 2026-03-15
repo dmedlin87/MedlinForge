@@ -50,12 +50,15 @@ function validateCatalog(catalog) {
   if (!Array.isArray(catalog.products) || catalog.products.length === 0) {
     fail('Catalog products must contain at least one product')
   }
+  if (!Array.isArray(catalog.packs) || catalog.packs.length === 0) {
+    fail('Catalog packs must contain at least one curated pack')
+  }
 
-  const seen = new Set()
+  const seenProducts = new Set()
   for (const product of catalog.products) {
     if (typeof product.id !== 'string' || !product.id.trim()) fail('Product id is required')
-    if (seen.has(product.id)) fail(`Duplicate product id '${product.id}'`)
-    seen.add(product.id)
+    if (seenProducts.has(product.id)) fail(`Duplicate product id '${product.id}'`)
+    seenProducts.add(product.id)
 
     if (!['manager', 'addon'].includes(product.type)) {
       fail(`Unsupported product type '${product.type}' for '${product.id}'`)
@@ -89,6 +92,43 @@ function validateCatalog(catalog) {
       }
     }
   }
+
+  const seenPacks = new Set()
+  for (const pack of catalog.packs) {
+    if (typeof pack.packId !== 'string' || !pack.packId.trim()) {
+      fail('Pack packId is required')
+    }
+    if (seenPacks.has(pack.packId)) fail(`Duplicate pack id '${pack.packId}'`)
+    seenPacks.add(pack.packId)
+    if (typeof pack.name !== 'string' || !pack.name.trim()) {
+      fail(`Pack '${pack.packId}' is missing a name`)
+    }
+    if (typeof pack.description !== 'string' || !pack.description.trim()) {
+      fail(`Pack '${pack.packId}' is missing a description`)
+    }
+    if (!CHANNELS.includes(pack.defaultChannel)) {
+      fail(`Pack '${pack.packId}' defaultChannel must be a supported channel`)
+    }
+    if (!Array.isArray(pack.members) || pack.members.length === 0) {
+      fail(`Pack '${pack.packId}' must define at least one member`)
+    }
+    for (const member of pack.members) {
+      if (!member || typeof member !== 'object') {
+        fail(`Pack '${pack.packId}' member entries must be objects`)
+      }
+      if (typeof member.productId !== 'string' || !member.productId.trim()) {
+        fail(`Pack '${pack.packId}' member productId is required`)
+      }
+      const product = catalog.products.find((entry) => entry.id === member.productId)
+      if (!product) fail(`Pack '${pack.packId}' references unknown product '${member.productId}'`)
+      if (product.type !== 'addon') {
+        fail(`Pack '${pack.packId}' can only include addon products`)
+      }
+      if (typeof member.required !== 'boolean') {
+        fail(`Pack '${pack.packId}' member '${member.productId}' required flag must be boolean`)
+      }
+    }
+  }
 }
 
 function selectRelease(releases, channel) {
@@ -114,13 +154,14 @@ function selectAsset(product, release) {
   return matches[0]
 }
 
-function validateManifest(manifest) {
-  if (manifest.schemaVersion !== 1) fail('Manifest schemaVersion must be 1')
-  if (!CHANNELS.includes(manifest.channel)) fail(`Unsupported manifest channel '${manifest.channel}'`)
-  ensureHttpsUrl(`https://${manifest.publisher}.github.io`, 'Manifest publisher derived host')
-  for (const [productId, product] of Object.entries(manifest.products)) {
-    if (productId !== product.id) fail(`Manifest product key '${productId}' must match product id '${product.id}'`)
-    if (product.channel !== manifest.channel) fail(`Product '${product.id}' channel does not match manifest channel`)
+function validateGeneratedCatalog(catalog) {
+  if (catalog.schemaVersion !== 2) fail('Catalog schemaVersion must be 2')
+  if (!CHANNELS.includes(catalog.channel)) fail(`Unsupported catalog channel '${catalog.channel}'`)
+  ensureHttpsUrl(`https://${catalog.publisher}.github.io`, 'Catalog publisher derived host')
+
+  for (const [productId, product] of Object.entries(catalog.products)) {
+    if (productId !== product.id) fail(`Catalog product key '${productId}' must match product id '${product.id}'`)
+    if (product.channel !== catalog.channel) fail(`Product '${product.id}' channel does not match catalog channel`)
     ensureHttpsUrl(product.packageUrl, `Product '${product.id}' packageUrl`)
     ensureHttpsUrl(product.releaseUrl, `Product '${product.id}' releaseUrl`)
     if (typeof product.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(product.sha256)) {
@@ -128,6 +169,18 @@ function validateManifest(manifest) {
     }
     if (!VERSION_RE.test(product.latestVersion)) {
       fail(`Product '${product.id}' latestVersion '${product.latestVersion}' is invalid`)
+    }
+  }
+
+  for (const [packId, pack] of Object.entries(catalog.packs)) {
+    if (packId !== pack.packId) fail(`Catalog pack key '${packId}' must match packId '${pack.packId}'`)
+    if (!Array.isArray(pack.members) || pack.members.length === 0) {
+      fail(`Pack '${pack.packId}' must include members`)
+    }
+    for (const member of pack.members) {
+      if (!catalog.products[member.productId]) {
+        fail(`Pack '${pack.packId}' references missing product '${member.productId}'`)
+      }
     }
   }
 }
@@ -170,14 +223,35 @@ export function buildManifests({ catalog, releaseIndex, assetDigests, generatedA
       }
     }
 
+    const packs = {}
+    for (const pack of [...catalog.packs].sort((left, right) => left.packId.localeCompare(right.packId))) {
+      const members = pack.members.filter((member) => Boolean(products[member.productId]))
+      if (!members.length) {
+        fail(`Pack '${pack.packId}' has no members available on channel '${channel}'`)
+      }
+      packs[pack.packId] = {
+        packId: pack.packId,
+        name: pack.name,
+        description: pack.description,
+        defaultChannel: pack.defaultChannel ?? channel,
+        recoveryLabel: pack.recoveryLabel ?? null,
+        recoveryDescription: pack.recoveryDescription ?? null,
+        members: members.map((member) => ({
+          productId: member.productId,
+          required: member.required,
+        })),
+      }
+    }
+
     const manifest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       publisher: catalog.publisher,
       generatedAt,
       channel,
       products: sortEntriesByKey(products),
+      packs: sortEntriesByKey(packs),
     }
-    validateManifest(manifest)
+    validateGeneratedCatalog(manifest)
     manifests[channel] = manifest
   }
 
@@ -255,19 +329,19 @@ export async function buildManifestsFromGitHub({
 }
 
 export async function writeManifests(outputDir, manifests) {
-  const manifestDir = path.join(outputDir, 'manifest')
-  await mkdir(manifestDir, { recursive: true })
+  const catalogDir = path.join(outputDir, 'catalog')
+  await mkdir(catalogDir, { recursive: true })
 
   for (const channel of CHANNELS) {
-    const target = path.join(manifestDir, `${channel}.json`)
+    const target = path.join(catalogDir, `${channel}.json`)
     await writeFile(target, `${JSON.stringify(manifests[channel], null, 2)}\n`, 'utf8')
   }
 
   await writeFile(
-    path.join(manifestDir, 'index.json'),
+    path.join(catalogDir, 'index.json'),
     `${JSON.stringify({
-      schemaVersion: 1,
-      manifests: CHANNELS.map((channel) => ({ channel, path: `/manifest/${channel}.json` })),
+      schemaVersion: 2,
+      catalogs: CHANNELS.map((channel) => ({ channel, path: `/catalog/${channel}.json` })),
     }, null, 2)}\n`,
     'utf8',
   )
@@ -280,7 +354,7 @@ async function main() {
   const catalog = JSON.parse(await readFile(catalogPath, 'utf8'))
   const manifests = await buildManifestsFromGitHub({ catalog, generatedAt })
   await writeManifests(outputDir, manifests)
-  process.stdout.write(`Wrote update manifests to ${outputDir}\n`)
+  process.stdout.write(`Wrote update catalogs to ${outputDir}\n`)
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

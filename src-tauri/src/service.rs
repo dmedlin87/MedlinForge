@@ -22,17 +22,20 @@ use crate::{
     manifest::{load_local_metadata, normalize_addon_root, read_manifest_file},
     models::{
         AddonRecord, ApplyRemoteAddonUpdateRequest, ChangeChannelRequest, ChangePreview,
-        ChangePreviewItem, ChangeType, Channel, CreateProfileRequest, DetectPathCandidate,
-        DetectPathsResponse, DuplicateProfileRequest, ImportZipRequest, InstallAddonRequest,
-        InstallManagerUpdateRequest, LiveFolderState, ManagerUpdateStatus, OperationLogEntry,
-        OperationResponse, PackageRevisionRequest, PendingOperationSummary, ProfileRecord,
-        ProfileSelection, ProfileSelectionInput, PromoteRevisionRequest, RefreshSourceRequest,
-        RegisterSourceRequest, RemoteProductType, RemoteProductUpdate, RestoreSnapshotRequest,
-        RevisionSummary, SaveSettingsRequest, ScanStateResponse, Settings, Severity,
-        SnapshotSummary, SnapshotType, SourceKind, SourceSummary, SwitchProfileRequest,
-        SyncProfileRequest, UpdateCheckResponse, UpdateChannel, ValidationIssue,
+        ChangePreviewItem, ChangeType, Channel, CreateProfileRequest, CuratedPackSummary,
+        DetectPathCandidate, DetectPathsResponse, DuplicateProfileRequest, ImportZipRequest,
+        InstallAddonRequest, InstallManagerUpdateRequest, LauncherActionState, LauncherPackMember,
+        LauncherPathHealth, LauncherSetupStatus, LauncherStateResponse, LiveFolderState,
+        ManagerUpdateStatus, OperationLogEntry, OperationResponse, PackStatus,
+        PackageRevisionRequest, PendingOperationSummary, ProfileRecord, ProfileSelection,
+        ProfileSelectionInput, PromoteRevisionRequest, RefreshSourceRequest, RegisterSourceRequest,
+        RemoteProductType, RemoteProductUpdate, RestoreLastKnownGoodRequest,
+        RestoreSnapshotRequest, RevisionSummary, RunInitialSetupRequest, SaveSettingsRequest,
+        ScanStateResponse, SetMaintainerModeRequest, Settings, Severity, SnapshotSummary,
+        SnapshotType, SourceKind, SourceSummary, SwitchProfileRequest, SyncProfileRequest,
+        UpdateChannel, UpdateCheckResponse, ValidationIssue,
     },
-    update_provider::{RemoteManifestProduct, UpdateProvider},
+    update_provider::{RemoteManifestPack, RemoteManifestProduct, UpdateCatalog, UpdateProvider},
 };
 
 pub type ServiceResult<T> = Result<T, ServiceError>;
@@ -103,6 +106,14 @@ struct RevisionRow {
 #[derive(Debug, Clone)]
 struct RemoteProductCacheRow {
     product_id: String,
+    channel: UpdateChannel,
+    payload_json: String,
+    checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct RemotePackCacheRow {
+    pack_id: String,
     channel: UpdateChannel,
     payload_json: String,
     checked_at: DateTime<Utc>,
@@ -221,12 +232,403 @@ impl ManagerService {
         })
     }
 
+    pub fn get_launcher_state(&mut self) -> ServiceResult<LauncherStateResponse> {
+        let settings = self.load_settings()?;
+        let detected_paths = self.detect_paths()?.candidates;
+        let live_unmanaged = if let Some(addons_path) = settings.addons_path.as_ref() {
+            self.list_unmanaged_in_path(Path::new(addons_path))?
+        } else {
+            Vec::new()
+        };
+        let interrupted_operation = self.load_unfinished_operation()?;
+
+        let (catalog, error_message) = match self.fetch_or_load_cached_catalog(&settings) {
+            Ok((catalog, _, _, error_message)) => (Some(catalog), error_message),
+            Err(error) => (None, Some(error.to_string())),
+        };
+
+        let pack = if let Some(catalog) = catalog.as_ref() {
+            self.resolve_selected_pack(&settings, catalog)?
+        } else {
+            self.load_cached_selected_pack(&settings)?
+        };
+        let pack_summary = if let (Some(catalog), Some(pack)) = (catalog.as_ref(), pack.as_ref()) {
+            Some(self.build_pack_summary(&settings, pack, &catalog.products)?)
+        } else {
+            None
+        };
+
+        let last_known_good_snapshot = if let Some(pack) = pack.as_ref() {
+            self.latest_recovery_snapshot_for_profile(&pack_profile_id(&pack.pack_id))?
+        } else {
+            self.latest_recovery_snapshot()?
+        };
+        let last_successful_sync_at = last_known_good_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.created_at);
+        let recovery_snapshots = self
+            .load_snapshots()?
+            .into_iter()
+            .take(8)
+            .collect::<Vec<_>>();
+
+        let setup_configured = settings.ascension_root_path.is_some()
+            && settings.addons_path.is_some()
+            && settings.saved_variables_path.is_some();
+        let setup_status = if !setup_configured {
+            LauncherSetupStatus::SetupRequired
+        } else if pack_summary
+            .as_ref()
+            .map(|summary| summary.installed_count == 0)
+            .unwrap_or(true)
+        {
+            LauncherSetupStatus::ReadyToInstall
+        } else {
+            LauncherSetupStatus::Ready
+        };
+
+        let pack_status = if interrupted_operation.is_some() {
+            PackStatus::RecoveryNeeded
+        } else if !setup_configured {
+            PackStatus::ReadyToInstall
+        } else if error_message.is_some() && pack_summary.is_none() {
+            PackStatus::Error
+        } else if let Some(summary) = pack_summary.as_ref() {
+            let updates_available = summary
+                .members
+                .iter()
+                .filter(|member| member.update_available)
+                .count();
+            let pack_profile_id = pack_profile_id(&summary.pack_id);
+            let preview = if self.load_profile(&pack_profile_id).is_ok() {
+                self.preview_profile_sync(&pack_profile_id, false, None)
+                    .ok()
+            } else {
+                None
+            };
+            if let Some(preview) = preview {
+                if !preview.blockers.is_empty() {
+                    PackStatus::Error
+                } else if (!preview.installs.is_empty() || !preview.removals.is_empty())
+                    && updates_available > 0
+                {
+                    PackStatus::UpdateAvailable
+                } else if !preview.installs.is_empty() || !preview.removals.is_empty() {
+                    PackStatus::ReadyToInstall
+                } else if updates_available > 0 {
+                    PackStatus::UpdateAvailable
+                } else {
+                    PackStatus::UpToDate
+                }
+            } else if summary.installed_count == 0 {
+                PackStatus::ReadyToInstall
+            } else if updates_available > 0 {
+                PackStatus::UpdateAvailable
+            } else {
+                PackStatus::ReadyToInstall
+            }
+        } else {
+            PackStatus::Error
+        };
+
+        let game_executable_path = self
+            .resolve_game_executable_path(&settings)
+            .map(|path| path.to_string_lossy().to_string());
+        let path_health = LauncherPathHealth {
+            configured: setup_configured,
+            ascension_root_path: settings.ascension_root_path.clone(),
+            addons_path: settings.addons_path.clone(),
+            saved_variables_path: settings.saved_variables_path.clone(),
+            game_executable_path,
+            detected_candidates: detected_paths,
+        };
+        let unmanaged_collisions = if let Some(summary) = pack_summary.as_ref() {
+            let known_folders = summary
+                .members
+                .iter()
+                .map(|member| member.install_folder.clone())
+                .collect::<HashSet<_>>();
+            let matching = live_unmanaged
+                .iter()
+                .filter(|folder| known_folders.contains(&folder.name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                live_unmanaged
+            } else {
+                matching
+            }
+        } else {
+            live_unmanaged
+        };
+        let updates_available = pack_summary
+            .as_ref()
+            .map(|summary| {
+                summary
+                    .members
+                    .iter()
+                    .filter(|member| member.update_available)
+                    .count()
+            })
+            .unwrap_or(0);
+
+        Ok(LauncherStateResponse {
+            settings,
+            setup_status,
+            pack_status,
+            action_state: if !setup_configured {
+                LauncherActionState::Blocked
+            } else {
+                LauncherActionState::Idle
+            },
+            pack: pack_summary,
+            path_health,
+            updates_available,
+            last_successful_sync_at,
+            last_known_good_snapshot,
+            recovery_snapshots,
+            unmanaged_collisions,
+            interrupted_operation,
+            error_message,
+        })
+    }
+
+    pub fn run_initial_setup(
+        &mut self,
+        request: RunInitialSetupRequest,
+    ) -> ServiceResult<LauncherStateResponse> {
+        let settings = self.load_settings()?;
+        let detected = self.detect_paths()?.candidates;
+        let resolved_root = request
+            .ascension_root_path
+            .or_else(|| settings.ascension_root_path.clone())
+            .or_else(|| {
+                if detected.len() == 1 {
+                    Some(detected[0].ascension_root_path.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                ServiceError::Message(
+                    "Initial setup needs a selected Ascension install path".to_string(),
+                )
+            })?;
+        let resolved_addons = request
+            .addons_path
+            .or_else(|| settings.addons_path.clone())
+            .or_else(|| {
+                detected
+                    .iter()
+                    .find(|candidate| candidate.ascension_root_path == resolved_root)
+                    .map(|candidate| candidate.addons_path.clone())
+            })
+            .unwrap_or_else(|| {
+                Path::new(&resolved_root)
+                    .join("Interface")
+                    .join("AddOns")
+                    .to_string_lossy()
+                    .to_string()
+            });
+        let resolved_saved_variables = request
+            .saved_variables_path
+            .or_else(|| settings.saved_variables_path.clone())
+            .or_else(|| {
+                detected
+                    .iter()
+                    .find(|candidate| candidate.ascension_root_path == resolved_root)
+                    .map(|candidate| candidate.saved_variables_path.clone())
+            })
+            .unwrap_or_else(|| {
+                Path::new(&resolved_root)
+                    .join("WTF")
+                    .join("Account")
+                    .join("SavedVariables")
+                    .to_string_lossy()
+                    .to_string()
+            });
+        let resolved_game_executable = request
+            .game_executable_path
+            .map(PathBuf::from)
+            .or_else(|| detect_game_executable(Path::new(&resolved_root)))
+            .map(|path| path.to_string_lossy().to_string());
+        let selected_pack_id = request
+            .selected_pack_id
+            .or_else(|| settings.selected_pack_id.clone());
+        let _ = self.save_settings(SaveSettingsRequest {
+            ascension_root_path: Some(resolved_root),
+            addons_path: Some(resolved_addons),
+            saved_variables_path: Some(resolved_saved_variables),
+            backup_retention_count: None,
+            auto_backup_enabled: None,
+            default_profile_id: None,
+            dev_mode_enabled: Some(false),
+            maintainer_mode_enabled: None,
+            onboarding_completed: Some(true),
+            selected_pack_id,
+            game_executable_path: resolved_game_executable,
+            update_channel: None,
+            update_manifest_override: None,
+        })?;
+        self.get_launcher_state()
+    }
+
+    pub fn sync_curated_pack(&mut self) -> ServiceResult<LauncherStateResponse> {
+        let settings = self.load_settings()?;
+        if settings.addons_path.is_none() || settings.saved_variables_path.is_none() {
+            return Err(ServiceError::Message(
+                "Complete setup before syncing the curated pack".to_string(),
+            ));
+        }
+        let (catalog, _, _, _) = self.fetch_or_load_cached_catalog(&settings)?;
+        let pack = self
+            .resolve_selected_pack(&settings, &catalog)?
+            .ok_or_else(|| ServiceError::Message("No curated pack is available".to_string()))?;
+        let channel = update_channel_to_channel(settings.update_channel);
+
+        for member in &pack.members {
+            let product = catalog.products.get(&member.product_id).ok_or_else(|| {
+                ServiceError::Message(format!(
+                    "Curated pack member '{}' is missing from the catalog",
+                    member.product_id
+                ))
+            })?;
+            if !UpdateProvider::manager_version_satisfies(product.min_manager_version.as_deref()) {
+                return Err(ServiceError::Message(format!(
+                    "{} requires BronzeForge Manager {} or newer",
+                    product.name,
+                    product.min_manager_version.clone().unwrap_or_default()
+                )));
+            }
+            let current_version = self
+                .latest_revision_for_channel(&member.product_id, channel)?
+                .map(|revision| revision.version);
+            let needs_download = current_version.is_none()
+                || UpdateProvider::is_remote_newer(
+                    &product.latest_version,
+                    current_version.as_deref(),
+                );
+            if !needs_download {
+                continue;
+            }
+            let download_path = self.directories.staging.join("pack-sync").join(format!(
+                "{}-{}-{}.zip",
+                product.id,
+                settings.update_channel.as_str(),
+                sanitize_version(&product.latest_version)
+            ));
+            self.update_provider
+                .download_verified_asset(&settings, product, &download_path)?;
+            let core = self
+                .load_addon(&member.product_id)
+                .map(|addon| addon.is_core)
+                .unwrap_or(member.required);
+            self.import_zip(ImportZipRequest {
+                path: download_path.to_string_lossy().to_string(),
+                channel: Some(channel),
+                core: Some(core || member.required),
+            })?;
+        }
+
+        let profile_id = self.ensure_pack_profile(&pack)?;
+        let response = self.sync_profile(SyncProfileRequest {
+            profile_id: profile_id.clone(),
+            preview_only: Some(false),
+            safe_mode: Some(false),
+            isolate_addon_id: None,
+        })?;
+        if !response.ok || !response.applied {
+            let blocker_message = response
+                .preview
+                .blockers
+                .first()
+                .map(|issue| issue.message.clone())
+                .unwrap_or_else(|| response.message.clone());
+            return Err(ServiceError::Message(blocker_message));
+        }
+        self.switch_profile(SwitchProfileRequest { profile_id })?;
+        self.get_launcher_state()
+    }
+
+    pub fn restore_last_known_good(
+        &mut self,
+        request: RestoreLastKnownGoodRequest,
+    ) -> ServiceResult<OperationResponse> {
+        let settings = self.load_settings()?;
+        let snapshot = if let Some(pack_id) = settings.selected_pack_id.clone() {
+            self.latest_recovery_snapshot_for_profile(&pack_profile_id(&pack_id))?
+        } else {
+            self.latest_recovery_snapshot()?
+        }
+        .ok_or_else(|| ServiceError::Message("No recovery snapshot is available".to_string()))?;
+        self.restore_snapshot(RestoreSnapshotRequest {
+            snapshot_id: snapshot.id,
+            preview_only: request.preview_only,
+        })
+    }
+
+    pub fn set_maintainer_mode(
+        &mut self,
+        request: SetMaintainerModeRequest,
+    ) -> ServiceResult<LauncherStateResponse> {
+        let _ = self.save_settings(SaveSettingsRequest {
+            ascension_root_path: None,
+            addons_path: None,
+            saved_variables_path: None,
+            backup_retention_count: None,
+            auto_backup_enabled: None,
+            default_profile_id: None,
+            dev_mode_enabled: Some(request.enabled),
+            maintainer_mode_enabled: Some(request.enabled),
+            onboarding_completed: None,
+            selected_pack_id: None,
+            game_executable_path: None,
+            update_channel: None,
+            update_manifest_override: None,
+        })?;
+        self.get_launcher_state()
+    }
+
+    pub fn launch_game(&mut self) -> ServiceResult<String> {
+        let settings = self.load_settings()?;
+        let executable = self
+            .resolve_game_executable_path(&settings)
+            .ok_or_else(|| {
+                ServiceError::Message("Could not resolve a game executable".to_string())
+            })?;
+        let mut command = Command::new(&executable);
+        if let Some(root) = settings.ascension_root_path.as_ref() {
+            command.current_dir(root);
+        }
+        command
+            .spawn()
+            .map_err(|error| ServiceError::Message(format!("Failed to launch game: {error}")))?;
+        Ok(executable.to_string_lossy().to_string())
+    }
+
+    pub fn open_addons_folder(&mut self) -> ServiceResult<String> {
+        let settings = self.load_settings()?;
+        let addons_path = settings.addons_path.ok_or_else(|| {
+            ServiceError::Message("Configure the AddOns path before opening it".to_string())
+        })?;
+        Command::new("explorer")
+            .arg(&addons_path)
+            .spawn()
+            .map_err(|error| {
+                ServiceError::Message(format!("Failed to open AddOns folder: {error}"))
+            })?;
+        Ok(addons_path)
+    }
+
     pub fn save_settings(
         &mut self,
         request: SaveSettingsRequest,
     ) -> ServiceResult<ScanStateResponse> {
         let current = self.load_settings()?;
         let dev_mode_enabled = request.dev_mode_enabled.unwrap_or(current.dev_mode_enabled);
+        let maintainer_mode_enabled = request
+            .maintainer_mode_enabled
+            .unwrap_or(current.maintainer_mode_enabled);
         let root = request
             .ascension_root_path
             .or(current.ascension_root_path)
@@ -278,8 +680,8 @@ impl ManagerService {
             None
         };
         self.connection.execute(
-            "INSERT INTO settings (id, ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, update_channel, update_manifest_override, last_update_check_at, last_update_error, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO settings (id, ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, maintainer_mode_enabled, onboarding_completed, selected_pack_id, game_executable_path, update_channel, update_manifest_override, last_update_check_at, last_update_error, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                ascension_root_path = excluded.ascension_root_path,
                addons_path = excluded.addons_path,
@@ -288,6 +690,10 @@ impl ManagerService {
                auto_backup_enabled = excluded.auto_backup_enabled,
                default_profile_id = excluded.default_profile_id,
                dev_mode_enabled = excluded.dev_mode_enabled,
+               maintainer_mode_enabled = excluded.maintainer_mode_enabled,
+               onboarding_completed = excluded.onboarding_completed,
+               selected_pack_id = excluded.selected_pack_id,
+               game_executable_path = excluded.game_executable_path,
                update_channel = excluded.update_channel,
                update_manifest_override = excluded.update_manifest_override,
                last_update_check_at = excluded.last_update_check_at,
@@ -301,6 +707,15 @@ impl ManagerService {
                 request.auto_backup_enabled.unwrap_or(current.auto_backup_enabled) as i64,
                 request.default_profile_id.or(current.default_profile_id),
                 dev_mode_enabled as i64,
+                maintainer_mode_enabled as i64,
+                request
+                    .onboarding_completed
+                    .unwrap_or(current.onboarding_completed) as i64,
+                request.selected_pack_id.or(current.selected_pack_id),
+                request
+                    .game_executable_path
+                    .or(current.game_executable_path)
+                    .map(normalize_display_path),
                 request
                     .update_channel
                     .unwrap_or(current.update_channel)
@@ -499,8 +914,133 @@ impl ManagerService {
             request.safe_mode.unwrap_or(false),
             request.isolate_addon_id.clone(),
         )?;
+        self.execute_preview_operation(
+            preview,
+            request.preview_only.unwrap_or(false),
+            "syncProfile",
+            json!({
+                "profileId": request.profile_id,
+                "safeMode": request.safe_mode.unwrap_or(false),
+                "isolateAddonId": request.isolate_addon_id
+            }),
+            format!("Preflight backup for {}", request.profile_id),
+            format!("Last known good for {}", request.profile_id),
+            "Profile sync completed successfully",
+            "Profile sync completed",
+            None,
+        )
+    }
+
+    pub fn install_addon(
+        &mut self,
+        request: InstallAddonRequest,
+    ) -> ServiceResult<OperationResponse> {
+        self.preview_profile_action(
+            request.profile_id,
+            &request.addon_id,
+            true,
+            None,
+            request.preview_only.unwrap_or(false),
+            "installAddon",
+            "Addon installed successfully",
+            "Addon installed",
+        )
+    }
+
+    pub fn update_addon(
+        &mut self,
+        request: InstallAddonRequest,
+    ) -> ServiceResult<OperationResponse> {
+        self.install_addon(request)
+    }
+
+    pub fn change_channel(
+        &mut self,
+        request: ChangeChannelRequest,
+    ) -> ServiceResult<OperationResponse> {
+        self.preview_profile_action(
+            request.profile_id,
+            &request.addon_id,
+            true,
+            Some(request.channel),
+            request.preview_only.unwrap_or(false),
+            "changeChannel",
+            &format!("Addon channel changed to {}", request.channel),
+            "Addon channel updated",
+        )
+    }
+
+    pub fn uninstall_addon(
+        &mut self,
+        request: InstallAddonRequest,
+    ) -> ServiceResult<OperationResponse> {
+        self.preview_profile_action(
+            request.profile_id,
+            &request.addon_id,
+            false,
+            None,
+            request.preview_only.unwrap_or(false),
+            "uninstallAddon",
+            "Addon removed successfully",
+            "Addon removed",
+        )
+    }
+
+    fn preview_profile_action(
+        &mut self,
+        profile_id: Option<String>,
+        addon_id: &str,
+        enabled: bool,
+        channel_override: Option<Channel>,
+        preview_only: bool,
+        operation: &str,
+        success_log: &str,
+        success_message: &str,
+    ) -> ServiceResult<OperationResponse> {
+        let profile_id = profile_id
+            .or_else(|| self.active_profile_id().ok().flatten())
+            .ok_or_else(|| ServiceError::Message("No active profile available".to_string()))?;
+        let selections = self.load_profile_selections(&profile_id)?;
+        let next_selections =
+            apply_selection_override(selections, addon_id, enabled, channel_override);
+        let preview = self.preview_profile_sync_with_selections(
+            &profile_id,
+            next_selections.clone(),
+            false,
+            None,
+        )?;
+        self.execute_preview_operation(
+            preview,
+            preview_only,
+            operation,
+            json!({
+                "profileId": profile_id,
+                "addonId": addon_id,
+                "enabled": enabled,
+                "channelOverride": channel_override.map(|value| value.to_string())
+            }),
+            format!("Preflight backup for {operation}"),
+            format!("Last known good for {operation}"),
+            success_log,
+            success_message,
+            Some((profile_id, next_selections)),
+        )
+    }
+
+    fn execute_preview_operation(
+        &mut self,
+        preview: ProfilePreview,
+        preview_only: bool,
+        operation: &str,
+        payload: serde_json::Value,
+        preflight_note: String,
+        recovery_note: String,
+        success_log: &str,
+        success_message: &str,
+        persist_profile: Option<(String, Vec<ProfileSelection>)>,
+    ) -> ServiceResult<OperationResponse> {
         let body = to_change_preview(&preview);
-        if request.preview_only.unwrap_or(false) || !preview.blockers.is_empty() {
+        if preview_only || !preview.blockers.is_empty() {
             return Ok(OperationResponse {
                 ok: preview.blockers.is_empty(),
                 applied: false,
@@ -518,42 +1058,34 @@ impl ManagerService {
         let snapshot_id = self.create_snapshot_for_preview(
             SnapshotType::Preflight,
             &preview,
-            Some(format!("Preflight backup for {}", request.profile_id)),
+            Some(preflight_note),
         )?;
         let operation_id = Uuid::new_v4().to_string();
         self.record_unfinished_operation(
             &operation_id,
-            "syncProfile",
-            &json!({
-                "profileId": request.profile_id,
-                "safeMode": request.safe_mode.unwrap_or(false),
-                "isolateAddonId": request.isolate_addon_id
-            }),
+            operation,
+            &payload,
             Some(snapshot_id.clone()),
         )?;
 
         if let Err(error) = self.apply_preview(&preview) {
             let _ = self.restore_snapshot_internal(&snapshot_id);
             self.clear_unfinished_operation(&operation_id)?;
-            self.insert_log(
-                "syncProfile",
-                "failed",
-                &format!("Profile sync failed: {error}"),
-            )?;
+            self.insert_log(operation, "failed", &format!("{operation} failed: {error}"))?;
             return Err(error);
+        }
+
+        if let Some((profile_id, selections)) = persist_profile {
+            self.replace_profile_selections(&profile_id, &selections)?;
         }
 
         self.clear_unfinished_operation(&operation_id)?;
         let recovery_snapshot_id = self.create_snapshot_for_preview(
             SnapshotType::Recovery,
             &preview,
-            Some(format!("Last known good for {}", request.profile_id)),
+            Some(recovery_note),
         )?;
-        self.insert_log(
-            "syncProfile",
-            "success",
-            "Profile sync completed successfully",
-        )?;
+        self.insert_log(operation, "success", success_log)?;
         self.prune_snapshots()?;
 
         Ok(OperationResponse {
@@ -561,66 +1093,8 @@ impl ManagerService {
             applied: true,
             operation_id: Some(operation_id),
             snapshot_id: Some(recovery_snapshot_id),
-            message: "Profile sync completed".to_string(),
+            message: success_message.to_string(),
             preview: body,
-        })
-    }
-
-    pub fn install_addon(
-        &mut self,
-        request: InstallAddonRequest,
-    ) -> ServiceResult<OperationResponse> {
-        let profile_id = request
-            .profile_id
-            .or_else(|| self.active_profile_id().ok().flatten())
-            .ok_or_else(|| ServiceError::Message("No active profile available".to_string()))?;
-        self.set_profile_addon_state(&profile_id, &request.addon_id, true, None)?;
-        self.sync_profile(SyncProfileRequest {
-            profile_id,
-            preview_only: request.preview_only,
-            safe_mode: Some(false),
-            isolate_addon_id: None,
-        })
-    }
-
-    pub fn update_addon(
-        &mut self,
-        request: InstallAddonRequest,
-    ) -> ServiceResult<OperationResponse> {
-        self.install_addon(request)
-    }
-
-    pub fn change_channel(
-        &mut self,
-        request: ChangeChannelRequest,
-    ) -> ServiceResult<OperationResponse> {
-        let profile_id = request
-            .profile_id
-            .or_else(|| self.active_profile_id().ok().flatten())
-            .ok_or_else(|| ServiceError::Message("No active profile available".to_string()))?;
-        self.set_profile_addon_state(&profile_id, &request.addon_id, true, Some(request.channel))?;
-        self.sync_profile(SyncProfileRequest {
-            profile_id,
-            preview_only: request.preview_only,
-            safe_mode: Some(false),
-            isolate_addon_id: None,
-        })
-    }
-
-    pub fn uninstall_addon(
-        &mut self,
-        request: InstallAddonRequest,
-    ) -> ServiceResult<OperationResponse> {
-        let profile_id = request
-            .profile_id
-            .or_else(|| self.active_profile_id().ok().flatten())
-            .ok_or_else(|| ServiceError::Message("No active profile available".to_string()))?;
-        self.set_profile_addon_state(&profile_id, &request.addon_id, false, None)?;
-        self.sync_profile(SyncProfileRequest {
-            profile_id,
-            preview_only: request.preview_only,
-            safe_mode: Some(false),
-            isolate_addon_id: None,
         })
     }
 
@@ -764,34 +1238,10 @@ impl ManagerService {
 
     pub fn check_updates(&mut self) -> ServiceResult<UpdateCheckResponse> {
         let settings = self.load_settings()?;
-        let (manifest_url, manifest_generated_at, remote_products, stale, error_message) =
-            match self.update_provider.fetch_manifest(&settings) {
-                Ok((manifest_url, manifest)) => {
-                    let products = manifest.products.into_values().collect::<Vec<_>>();
-                    self.cache_remote_products(manifest.channel, &products)?;
-                    self.record_update_check(Some(now_string()), None)?;
-                    (
-                        Some(manifest_url),
-                        Some(manifest.generated_at),
-                        products,
-                        false,
-                        None,
-                    )
-                }
-                Err(error) => {
-                    self.record_update_check(
-                        settings.last_update_check_at.map(|value| value.to_rfc3339()),
-                        Some(error.to_string()),
-                    )?;
-                    (
-                        None,
-                        None,
-                        self.load_cached_remote_products(settings.update_channel)?,
-                        true,
-                        Some(error.to_string()),
-                    )
-                }
-            };
+        let (catalog, stale, manifest_url, error_message) =
+            self.fetch_or_load_cached_catalog(&settings)?;
+        let manifest_generated_at = Some(catalog.generated_at.clone());
+        let remote_products = catalog.products.into_values().collect::<Vec<_>>();
 
         let settings = self.load_settings()?;
         let addons = self.load_addons()?;
@@ -928,16 +1378,19 @@ impl ManagerService {
             .staging
             .join("manager-updates")
             .join(installer_name);
-        let installer_path = self
-            .update_provider
-            .download_verified_asset(&settings, &product, &installer_path)?;
-        Command::new(&installer_path)
-            .spawn()
-            .map_err(|error| ServiceError::Message(format!("Failed to launch installer: {error}")))?;
+        let installer_path =
+            self.update_provider
+                .download_verified_asset(&settings, &product, &installer_path)?;
+        Command::new(&installer_path).spawn().map_err(|error| {
+            ServiceError::Message(format!("Failed to launch installer: {error}"))
+        })?;
         self.insert_log(
             "installManagerUpdate",
             "success",
-            &format!("Launched BronzeForge Manager installer {}", product.latest_version),
+            &format!(
+                "Launched BronzeForge Manager installer {}",
+                product.latest_version
+            ),
         )?;
 
         if let Some(app_handle) = self.app_handle.clone() {
@@ -1108,7 +1561,7 @@ impl ManagerService {
               backup_retention_count INTEGER NOT NULL DEFAULT 20,
               auto_backup_enabled INTEGER NOT NULL DEFAULT 1,
               default_profile_id TEXT,
-              dev_mode_enabled INTEGER NOT NULL DEFAULT 1,
+              dev_mode_enabled INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS addons (
@@ -1211,18 +1664,32 @@ impl ManagerService {
                 )",
             ],
         )?;
+        self.apply_migration(
+            2,
+            "launcher_reset_v2",
+            &[
+                "ALTER TABLE settings ADD COLUMN maintainer_mode_enabled INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE settings ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE settings ADD COLUMN selected_pack_id TEXT",
+                "ALTER TABLE settings ADD COLUMN game_executable_path TEXT",
+                "CREATE TABLE IF NOT EXISTS remote_packs (
+                  pack_id TEXT NOT NULL,
+                  channel TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  checked_at TEXT NOT NULL,
+                  PRIMARY KEY (pack_id, channel)
+                )",
+            ],
+        )?;
         Ok(())
     }
 
     fn apply_migration(&mut self, id: i64, name: &str, statements: &[&str]) -> ServiceResult<()> {
-        let applied = self
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, i64>(0),
-            )?
-            > 0;
+        let applied = self.connection.query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
         if applied {
             return Ok(());
         }
@@ -1250,7 +1717,7 @@ impl ManagerService {
                 })?;
         if settings_count == 0 {
             self.connection.execute(
-                "INSERT INTO settings (id, backup_retention_count, auto_backup_enabled, dev_mode_enabled, updated_at) VALUES (1, 20, 1, 1, ?1)",
+                "INSERT INTO settings (id, backup_retention_count, auto_backup_enabled, dev_mode_enabled, maintainer_mode_enabled, onboarding_completed, updated_at) VALUES (1, 20, 1, 0, 0, 0, ?1)",
                 params![now_string()],
             )?;
         }
@@ -1430,11 +1897,26 @@ impl ManagerService {
         safe_mode: bool,
         isolate_addon_id: Option<String>,
     ) -> ServiceResult<ProfilePreview> {
+        let selections = self.load_profile_selections(profile_id)?;
+        self.preview_profile_sync_with_selections(
+            profile_id,
+            selections,
+            safe_mode,
+            isolate_addon_id,
+        )
+    }
+
+    fn preview_profile_sync_with_selections(
+        &mut self,
+        profile_id: &str,
+        selections: Vec<ProfileSelection>,
+        safe_mode: bool,
+        isolate_addon_id: Option<String>,
+    ) -> ServiceResult<ProfilePreview> {
         let settings = self.load_settings()?;
         let addons_path = settings.addons_path.clone();
         let saved_variables_path = settings.saved_variables_path.clone();
         let profile = self.load_profile(profile_id)?;
-        let selections = self.load_profile_selections(&profile.id)?;
         let addon_map = self
             .load_addons()?
             .into_iter()
@@ -1630,8 +2112,7 @@ impl ManagerService {
                                 .and_then(|addon_id| addon_map.get(addon_id))
                                 .map(|addon| RemovalPlan {
                                     addon: addon.clone(),
-                                    target_path: Path::new(addons_path)
-                                        .join(&addon.install_folder),
+                                    target_path: Path::new(addons_path).join(&addon.install_folder),
                                 })
                         } else {
                             None
@@ -1948,24 +2429,224 @@ impl ManagerService {
         Ok(())
     }
 
-    fn set_profile_addon_state(
+    fn replace_profile_selections(
         &mut self,
         profile_id: &str,
-        addon_id: &str,
-        enabled: bool,
-        channel_override: Option<Channel>,
+        selections: &[ProfileSelection],
     ) -> ServiceResult<()> {
         self.connection.execute(
-            "INSERT INTO profile_addons (profile_id, addon_id, enabled, channel_override) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(profile_id, addon_id) DO UPDATE SET enabled = excluded.enabled, channel_override = excluded.channel_override",
-            params![profile_id, addon_id, enabled as i64, channel_override.map(|value| value.to_string())],
+            "DELETE FROM profile_addons WHERE profile_id = ?1",
+            params![profile_id],
         )?;
+        for selection in selections {
+            self.connection.execute(
+                "INSERT INTO profile_addons (profile_id, addon_id, enabled, channel_override)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    profile_id,
+                    &selection.addon_id,
+                    selection.enabled as i64,
+                    selection.channel_override.map(|value| value.to_string())
+                ],
+            )?;
+        }
         Ok(())
+    }
+
+    fn fetch_or_load_cached_catalog(
+        &mut self,
+        settings: &Settings,
+    ) -> ServiceResult<(UpdateCatalog, bool, Option<String>, Option<String>)> {
+        match self.update_provider.fetch_catalog(settings) {
+            Ok((catalog_url, catalog)) => {
+                let products = catalog.products.values().cloned().collect::<Vec<_>>();
+                let packs = catalog.packs.values().cloned().collect::<Vec<_>>();
+                self.cache_remote_products(catalog.channel, &products)?;
+                self.cache_remote_packs(catalog.channel, &packs)?;
+                self.record_update_check(Some(now_string()), None)?;
+                Ok((catalog, false, Some(catalog_url), None))
+            }
+            Err(error) => {
+                self.record_update_check(
+                    settings
+                        .last_update_check_at
+                        .map(|value| value.to_rfc3339()),
+                    Some(error.to_string()),
+                )?;
+                let products = self.load_cached_remote_products(settings.update_channel)?;
+                let packs = self.load_cached_remote_packs(settings.update_channel)?;
+                if products.is_empty() || packs.is_empty() {
+                    return Err(error);
+                }
+                Ok((
+                    UpdateCatalog {
+                        schema_version: 2,
+                        publisher: env!("BRONZEFORGE_UPDATE_PUBLISHER").to_string(),
+                        generated_at: settings
+                            .last_update_check_at
+                            .map(|value| value.to_rfc3339())
+                            .unwrap_or_else(now_string),
+                        channel: settings.update_channel,
+                        products: products
+                            .into_iter()
+                            .map(|product| (product.id.clone(), product))
+                            .collect(),
+                        packs: packs
+                            .into_iter()
+                            .map(|pack| (pack.pack_id.clone(), pack))
+                            .collect(),
+                    },
+                    true,
+                    None,
+                    Some(error.to_string()),
+                ))
+            }
+        }
+    }
+
+    fn resolve_selected_pack(
+        &self,
+        settings: &Settings,
+        catalog: &UpdateCatalog,
+    ) -> ServiceResult<Option<RemoteManifestPack>> {
+        if let Some(pack_id) = settings.selected_pack_id.as_ref() {
+            if let Some(pack) = catalog.packs.get(pack_id) {
+                return Ok(Some(pack.clone()));
+            }
+        }
+        Ok(catalog.packs.values().next().cloned())
+    }
+
+    fn load_cached_selected_pack(
+        &self,
+        settings: &Settings,
+    ) -> ServiceResult<Option<RemoteManifestPack>> {
+        if let Some(pack_id) = settings.selected_pack_id.as_ref() {
+            if let Some(pack) = self.load_cached_remote_pack(pack_id, settings.update_channel)? {
+                return Ok(Some(pack));
+            }
+        }
+        Ok(self
+            .load_cached_remote_packs(settings.update_channel)?
+            .into_iter()
+            .next())
+    }
+
+    fn build_pack_summary(
+        &self,
+        settings: &Settings,
+        pack: &RemoteManifestPack,
+        products: &std::collections::BTreeMap<String, RemoteManifestProduct>,
+    ) -> ServiceResult<CuratedPackSummary> {
+        let channel = update_channel_to_channel(settings.update_channel);
+        let mut members = Vec::new();
+        for member in &pack.members {
+            let product = products.get(&member.product_id).ok_or_else(|| {
+                ServiceError::Message(format!(
+                    "Pack '{}' is missing product '{}'",
+                    pack.pack_id, member.product_id
+                ))
+            })?;
+            let addon = self.load_addon(&member.product_id).ok();
+            let current_version = self
+                .latest_revision_for_channel(&member.product_id, channel)?
+                .map(|revision| revision.version);
+            let install_folder = addon
+                .as_ref()
+                .map(|entry| entry.install_folder.clone())
+                .unwrap_or_else(|| product.name.replace(' ', ""));
+            let display_name = addon
+                .as_ref()
+                .map(|entry| entry.display_name.clone())
+                .unwrap_or_else(|| product.name.clone());
+            let update_available = UpdateProvider::is_remote_newer(
+                &product.latest_version,
+                current_version.as_deref(),
+            );
+            members.push(LauncherPackMember {
+                addon_id: member.product_id.clone(),
+                display_name,
+                install_folder,
+                required: member.required,
+                installed: current_version.is_some(),
+                current_version,
+                latest_version: Some(product.latest_version.clone()),
+                update_available,
+            });
+        }
+        let installed_count = members.iter().filter(|member| member.installed).count();
+        Ok(CuratedPackSummary {
+            pack_id: pack.pack_id.clone(),
+            name: pack.name.clone(),
+            description: pack.description.clone(),
+            default_channel: pack.default_channel,
+            recovery_label: pack.recovery_label.clone(),
+            recovery_description: pack.recovery_description.clone(),
+            installed_count,
+            total_count: members.len(),
+            members,
+        })
+    }
+
+    fn latest_recovery_snapshot_for_profile(
+        &self,
+        profile_id: &str,
+    ) -> ServiceResult<Option<SnapshotSummary>> {
+        Ok(self.load_snapshots()?.into_iter().find(|snapshot| {
+            snapshot.snapshot_type == SnapshotType::Recovery
+                && snapshot.related_profile_id.as_deref() == Some(profile_id)
+        }))
+    }
+
+    fn latest_recovery_snapshot(&self) -> ServiceResult<Option<SnapshotSummary>> {
+        Ok(self
+            .load_snapshots()?
+            .into_iter()
+            .find(|snapshot| snapshot.snapshot_type == SnapshotType::Recovery))
+    }
+
+    fn resolve_game_executable_path(&self, settings: &Settings) -> Option<PathBuf> {
+        settings
+            .game_executable_path
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .or_else(|| {
+                settings
+                    .ascension_root_path
+                    .as_ref()
+                    .and_then(|root| detect_game_executable(Path::new(root)))
+            })
+    }
+
+    fn ensure_pack_profile(&mut self, pack: &RemoteManifestPack) -> ServiceResult<String> {
+        let profile_id = pack_profile_id(&pack.pack_id);
+        let addon_ids = pack
+            .members
+            .iter()
+            .map(|member| member.product_id.clone())
+            .collect::<HashSet<_>>();
+        let selections = self
+            .load_addons()?
+            .into_iter()
+            .map(|addon| ProfileSelectionInput {
+                addon_id: addon.id.clone(),
+                enabled: addon_ids.contains(&addon.id),
+                channel_override: None,
+            })
+            .collect::<Vec<_>>();
+        self.create_or_update_profile(CreateProfileRequest {
+            profile_id: Some(profile_id.clone()),
+            name: format!("{} Pack", pack.name),
+            notes: Some(pack.description.clone()),
+            selections,
+        })?;
+        Ok(profile_id)
     }
 
     fn load_settings(&self) -> ServiceResult<Settings> {
         Ok(self.connection.query_row(
-            "SELECT ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, update_channel, last_update_check_at, last_update_error, update_manifest_override FROM settings WHERE id = 1",
+            "SELECT ascension_root_path, addons_path, saved_variables_path, backup_retention_count, auto_backup_enabled, default_profile_id, dev_mode_enabled, maintainer_mode_enabled, onboarding_completed, selected_pack_id, game_executable_path, update_channel, last_update_check_at, last_update_error, update_manifest_override FROM settings WHERE id = 1",
             params![],
             |row| {
                 Ok(Settings {
@@ -1976,16 +2657,20 @@ impl ManagerService {
                     auto_backup_enabled: row.get::<_, i64>(4)? != 0,
                     default_profile_id: row.get(5)?,
                     dev_mode_enabled: row.get::<_, i64>(6)? != 0,
+                    maintainer_mode_enabled: row.get::<_, i64>(7)? != 0,
+                    onboarding_completed: row.get::<_, i64>(8)? != 0,
+                    selected_pack_id: row.get(9)?,
+                    game_executable_path: row.get(10)?,
                     update_channel: row
-                        .get::<_, String>(7)?
+                        .get::<_, String>(11)?
                         .parse::<UpdateChannel>()
                         .map_err(string_to_sql_error)?,
                     last_update_check_at: row
-                        .get::<_, Option<String>>(8)?
+                        .get::<_, Option<String>>(12)?
                         .map(|value| parse_timestamp(&value).map_err(string_to_sql_error))
                         .transpose()?,
-                    last_update_error: row.get(9)?,
-                    update_manifest_override: row.get(10)?,
+                    last_update_error: row.get(13)?,
+                    update_manifest_override: row.get(14)?,
                 })
             },
         )?)
@@ -2031,6 +2716,30 @@ impl ManagerService {
         Ok(())
     }
 
+    fn cache_remote_packs(
+        &mut self,
+        channel: UpdateChannel,
+        packs: &[RemoteManifestPack],
+    ) -> ServiceResult<()> {
+        self.connection.execute(
+            "DELETE FROM remote_packs WHERE channel = ?1",
+            params![channel.to_string()],
+        )?;
+        for pack in packs {
+            self.connection.execute(
+                "INSERT INTO remote_packs (pack_id, channel, payload_json, checked_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    &pack.pack_id,
+                    channel.to_string(),
+                    serde_json::to_string(pack)?,
+                    now_string()
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     fn load_cached_remote_products(
         &self,
         channel: UpdateChannel,
@@ -2057,8 +2766,7 @@ impl ManagerService {
             .map_err(ServiceError::from)?
             .into_iter()
             .map(|row| {
-                let product =
-                    serde_json::from_str::<RemoteManifestProduct>(&row.payload_json)?;
+                let product = serde_json::from_str::<RemoteManifestProduct>(&row.payload_json)?;
                 if product.id != row.product_id || product.channel != row.channel {
                     return Err(ServiceError::Message(format!(
                         "Cached remote product '{}' is inconsistent",
@@ -2067,6 +2775,46 @@ impl ManagerService {
                 }
                 let _ = row.checked_at;
                 Ok(product)
+            })
+            .collect()
+    }
+
+    fn load_cached_remote_packs(
+        &self,
+        channel: UpdateChannel,
+    ) -> ServiceResult<Vec<RemoteManifestPack>> {
+        let mut statement = self.connection.prepare(
+            "SELECT pack_id, channel, payload_json, checked_at
+             FROM remote_packs
+             WHERE channel = ?1
+             ORDER BY pack_id COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(params![channel.to_string()], |row| {
+            Ok(RemotePackCacheRow {
+                pack_id: row.get(0)?,
+                channel: row
+                    .get::<_, String>(1)?
+                    .parse::<UpdateChannel>()
+                    .map_err(string_to_sql_error)?,
+                payload_json: row.get(2)?,
+                checked_at: parse_timestamp(&row.get::<_, String>(3)?)
+                    .map_err(string_to_sql_error)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(ServiceError::from)?
+            .into_iter()
+            .map(|row| {
+                let pack = serde_json::from_str::<RemoteManifestPack>(&row.payload_json)?;
+                if pack.pack_id != row.pack_id {
+                    return Err(ServiceError::Message(format!(
+                        "Cached remote pack '{}' is inconsistent",
+                        row.pack_id
+                    )));
+                }
+                let _ = row.channel;
+                let _ = row.checked_at;
+                Ok(pack)
             })
             .collect()
     }
@@ -2080,6 +2828,17 @@ impl ManagerService {
             .load_cached_remote_products(channel)?
             .into_iter()
             .find(|product| product.id == product_id))
+    }
+
+    fn load_cached_remote_pack(
+        &self,
+        pack_id: &str,
+        channel: UpdateChannel,
+    ) -> ServiceResult<Option<RemoteManifestPack>> {
+        Ok(self
+            .load_cached_remote_packs(channel)?
+            .into_iter()
+            .find(|pack| pack.pack_id == pack_id))
     }
 
     fn to_manager_update_status(
@@ -2118,16 +2877,15 @@ impl ManagerService {
         product: &RemoteManifestProduct,
     ) -> ServiceResult<RemoteProductUpdate> {
         let current_version = self
-            .latest_revision_for_channel(&addon.id, update_channel_to_channel(settings.update_channel))?
+            .latest_revision_for_channel(
+                &addon.id,
+                update_channel_to_channel(settings.update_channel),
+            )?
             .map(|revision| revision.version);
         let min_manager_satisfied =
             UpdateProvider::manager_version_satisfies(product.min_manager_version.as_deref());
-        let available =
-            min_manager_satisfied
-                && UpdateProvider::is_remote_newer(
-                    &product.latest_version,
-                    current_version.as_deref(),
-                );
+        let available = min_manager_satisfied
+            && UpdateProvider::is_remote_newer(&product.latest_version, current_version.as_deref());
         let status = if !min_manager_satisfied {
             "requires-manager-update"
         } else if available {
@@ -2516,7 +3274,50 @@ fn update_channel_to_channel(channel: UpdateChannel) -> Channel {
 }
 
 fn sanitize_version(value: &str) -> String {
-    format!("-{}", value.replace(|character: char| !character.is_ascii_alphanumeric(), "-"))
+    format!(
+        "-{}",
+        value.replace(|character: char| !character.is_ascii_alphanumeric(), "-")
+    )
+}
+
+fn pack_profile_id(pack_id: &str) -> String {
+    format!("pack::{pack_id}")
+}
+
+fn apply_selection_override(
+    mut selections: Vec<ProfileSelection>,
+    addon_id: &str,
+    enabled: bool,
+    channel_override: Option<Channel>,
+) -> Vec<ProfileSelection> {
+    if let Some(selection) = selections
+        .iter_mut()
+        .find(|selection| selection.addon_id == addon_id)
+    {
+        selection.enabled = enabled;
+        selection.channel_override = channel_override;
+        return selections;
+    }
+    selections.push(ProfileSelection {
+        addon_id: addon_id.to_string(),
+        enabled,
+        channel_override,
+    });
+    selections
+}
+
+fn detect_game_executable(root: &Path) -> Option<PathBuf> {
+    [
+        "Wow.exe",
+        "Wow-64.exe",
+        "Project Ascension.exe",
+        "Ascension.exe",
+        "Launcher.exe",
+        "Ascension Launcher.exe",
+    ]
+    .iter()
+    .map(|name| root.join(name))
+    .find(|path| path.exists())
 }
 
 fn detect_path_candidates(roots: &[PathBuf]) -> ServiceResult<Vec<DetectPathCandidate>> {
@@ -2739,9 +3540,10 @@ fn zip_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_path_candidates, ManagerService};
+    use super::{ManagerService, detect_path_candidates};
     use crate::models::{
-        Channel, RegisterSourceRequest, SaveSettingsRequest, SourceKind, SyncProfileRequest,
+        Channel, CreateProfileRequest, InstallAddonRequest, ProfileSelectionInput,
+        RegisterSourceRequest, SaveSettingsRequest, SourceKind, SyncProfileRequest,
     };
     use std::{fs, path::Path};
 
@@ -2777,6 +3579,10 @@ mod tests {
                 auto_backup_enabled: None,
                 default_profile_id: None,
                 dev_mode_enabled: None,
+                maintainer_mode_enabled: None,
+                onboarding_completed: None,
+                selected_pack_id: None,
+                game_executable_path: None,
                 update_channel: None,
                 update_manifest_override: None,
             })
@@ -2822,6 +3628,10 @@ mod tests {
                 auto_backup_enabled: None,
                 default_profile_id: None,
                 dev_mode_enabled: None,
+                maintainer_mode_enabled: None,
+                onboarding_completed: None,
+                selected_pack_id: None,
+                game_executable_path: None,
                 update_channel: None,
                 update_manifest_override: None,
             })
@@ -2858,6 +3668,81 @@ mod tests {
     }
 
     #[test]
+    fn preview_only_install_does_not_mutate_profile_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let addon_root = make_addon(temp.path(), "BronzeForgeUI", "BronzeForge UI", "1.0.0");
+        let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
+        service
+            .save_settings(SaveSettingsRequest {
+                ascension_root_path: None,
+                addons_path: Some(temp.path().join("live").to_string_lossy().to_string()),
+                saved_variables_path: Some(
+                    temp.path()
+                        .join("WTF")
+                        .join("Account")
+                        .join("SavedVariables")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                backup_retention_count: None,
+                auto_backup_enabled: None,
+                default_profile_id: None,
+                dev_mode_enabled: None,
+                maintainer_mode_enabled: None,
+                onboarding_completed: None,
+                selected_pack_id: None,
+                game_executable_path: None,
+                update_channel: None,
+                update_manifest_override: None,
+            })
+            .unwrap();
+        service
+            .register_source(RegisterSourceRequest {
+                source_kind: SourceKind::LocalFolder,
+                path: addon_root.to_string_lossy().to_string(),
+                channel: Some(Channel::Stable),
+                core: Some(true),
+            })
+            .unwrap();
+
+        let addon_id = service.scan_live_state().unwrap().addons[0].id.clone();
+        let profile_id = "preview-profile".to_string();
+        service
+            .create_or_update_profile(CreateProfileRequest {
+                profile_id: Some(profile_id.clone()),
+                name: "Preview Profile".to_string(),
+                notes: None,
+                selections: vec![ProfileSelectionInput {
+                    addon_id: addon_id.clone(),
+                    enabled: false,
+                    channel_override: None,
+                }],
+            })
+            .unwrap();
+
+        service
+            .install_addon(InstallAddonRequest {
+                addon_id: addon_id.clone(),
+                profile_id: Some(profile_id.clone()),
+                preview_only: Some(true),
+            })
+            .unwrap();
+
+        let state = service.scan_live_state().unwrap();
+        let profile = state
+            .profiles
+            .into_iter()
+            .find(|entry| entry.id == profile_id)
+            .unwrap();
+        let selection = profile
+            .selections
+            .into_iter()
+            .find(|entry| entry.addon_id == addon_id)
+            .unwrap();
+        assert!(!selection.enabled);
+    }
+
+    #[test]
     fn detect_paths_finds_launcher_resource_clients() {
         let temp = tempfile::tempdir().unwrap();
         let launcher = temp
@@ -2869,19 +3754,15 @@ mod tests {
         for client in ["client", "epoch_live"] {
             let root = launcher.join(client);
             fs::create_dir_all(root.join("Interface").join("AddOns")).unwrap();
-            fs::create_dir_all(root.join("WTF").join("Account").join("SavedVariables"))
-                .unwrap();
+            fs::create_dir_all(root.join("WTF").join("Account").join("SavedVariables")).unwrap();
         }
 
-        let candidates =
-            detect_path_candidates(&[temp.path().join("Program Files")]).unwrap();
+        let candidates = detect_path_candidates(&[temp.path().join("Program Files")]).unwrap();
 
         assert_eq!(candidates.len(), 2);
         assert!(candidates.iter().any(|candidate| {
             candidate.label == "client"
-                && candidate
-                    .addons_path
-                    .ends_with("client\\Interface\\AddOns")
+                && candidate.addons_path.ends_with("client\\Interface\\AddOns")
         }));
         assert!(candidates.iter().any(|candidate| {
             candidate.label == "epoch_live"

@@ -6,12 +6,13 @@ mod update_provider;
 use std::sync::{Arc, Mutex};
 
 use models::{
-    ApplyRemoteAddonUpdateRequest, ChangeChannelRequest, CreateProfileRequest,
-    DetectPathsResponse, DuplicateProfileRequest, ImportZipRequest, InstallAddonRequest,
-    InstallManagerUpdateRequest, ManagerUpdateStatus, OperationResponse, PackageRevisionRequest,
-    PromoteRevisionRequest, RefreshSourceRequest, RegisterSourceRequest, RestoreSnapshotRequest,
-    SaveSettingsRequest, ScanStateResponse, SnapshotSummary, SwitchProfileRequest,
-    SyncProfileRequest, UpdateCheckResponse,
+    ApplyRemoteAddonUpdateRequest, ChangeChannelRequest, CreateProfileRequest, DetectPathsResponse,
+    DuplicateProfileRequest, ImportZipRequest, InstallAddonRequest, InstallManagerUpdateRequest,
+    LauncherStateResponse, ManagerUpdateStatus, OperationResponse, PackageRevisionRequest,
+    PromoteRevisionRequest, RefreshSourceRequest, RegisterSourceRequest,
+    RestoreLastKnownGoodRequest, RestoreSnapshotRequest, RunInitialSetupRequest,
+    SaveSettingsRequest, ScanStateResponse, SetMaintainerModeRequest, SnapshotSummary,
+    SwitchProfileRequest, SyncProfileRequest, UpdateCheckResponse,
 };
 use service::ManagerService;
 use tauri::{Manager, State};
@@ -44,6 +45,50 @@ fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<ScanStateResponse, String> {
     state.with_service(|service| service.save_settings(request))
+}
+
+#[tauri::command]
+fn get_launcher_state(state: State<'_, AppState>) -> Result<LauncherStateResponse, String> {
+    state.with_service(|service| service.get_launcher_state())
+}
+
+#[tauri::command]
+fn run_initial_setup(
+    state: State<'_, AppState>,
+    request: RunInitialSetupRequest,
+) -> Result<LauncherStateResponse, String> {
+    state.with_service(|service| service.run_initial_setup(request))
+}
+
+#[tauri::command]
+fn sync_curated_pack(state: State<'_, AppState>) -> Result<LauncherStateResponse, String> {
+    state.with_service(|service| service.sync_curated_pack())
+}
+
+#[tauri::command]
+fn restore_last_known_good(
+    state: State<'_, AppState>,
+    request: RestoreLastKnownGoodRequest,
+) -> Result<OperationResponse, String> {
+    state.with_service(|service| service.restore_last_known_good(request))
+}
+
+#[tauri::command]
+fn launch_game(state: State<'_, AppState>) -> Result<String, String> {
+    state.with_service(|service| service.launch_game())
+}
+
+#[tauri::command]
+fn open_addons_folder(state: State<'_, AppState>) -> Result<String, String> {
+    state.with_service(|service| service.open_addons_folder())
+}
+
+#[tauri::command]
+fn set_maintainer_mode(
+    state: State<'_, AppState>,
+    request: SetMaintainerModeRequest,
+) -> Result<LauncherStateResponse, String> {
+    state.with_service(|service| service.set_maintainer_mode(request))
 }
 
 #[tauri::command]
@@ -206,6 +251,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             detect_paths,
             save_settings,
+            get_launcher_state,
+            run_initial_setup,
+            sync_curated_pack,
+            restore_last_known_good,
+            launch_game,
+            open_addons_folder,
+            set_maintainer_mode,
             scan_live_state,
             register_source,
             refresh_source,

@@ -1,6 +1,26 @@
 {
   "publisher": "dmedlin87",
-  "pagesBaseUrl": "https://dmedlin87.github.io/MedlinForge",
+  "pagesBaseUrl": "https://dmedlin87.github.io/MedlinForge/catalog",
+  "packs": [
+    {
+      "packId": "bronzeforge-default",
+      "name": "BronzeForge Pack",
+      "description": "Curated Bronzebeard launcher pack for one-click install and sync.",
+      "defaultChannel": "stable",
+      "recoveryLabel": "Restore last known good",
+      "recoveryDescription": "Revert the pack to the most recent working state if a test build breaks the UI.",
+      "members": [
+        {
+          "productId": "bronzeforge-ui",
+          "required": true
+        },
+        {
+          "productId": "bronze-bars",
+          "required": true
+        }
+      ]
+    }
+  ],
   "products": [
     {
       "id": "bronzeforge-manager",
@@ -11,6 +31,26 @@
       "assetName": "bronzeforge-manager-windows-x64-installer.exe",
       "installKind": "nsis-installer",
       "platform": "windows-x64"
+    },
+    {
+      "id": "bronzeforge-ui",
+      "name": "BronzeForge UI",
+      "type": "addon",
+      "repository": "dmedlin87/BronzeForgeUI",
+      "channels": ["stable", "beta"],
+      "assetName": "BronzeForgeUI.zip",
+      "installKind": "addon-folder-zip",
+      "platform": "windows-any"
+    },
+    {
+      "id": "bronze-bars",
+      "name": "Bronze Bars",
+      "type": "addon",
+      "repository": "dmedlin87/BronzeBars",
+      "channels": ["stable"],
+      "assetName": "BronzeBars.zip",
+      "installKind": "addon-folder-zip",
+      "platform": "windows-any"
     }
   ]
 }

@@ -4,6 +4,9 @@ export type SourceKind = 'local-folder' | 'zip-file' | 'manifest'
 export type Severity = 'blocker' | 'warning'
 export type ChangeType = 'install' | 'update' | 'reinstall' | 'remove'
 export type RemoteProductType = 'manager' | 'addon'
+export type LauncherSetupStatus = 'setup_required' | 'ready_to_install' | 'ready'
+export type PackStatus = 'ready_to_install' | 'syncing' | 'up_to_date' | 'update_available' | 'recovery_needed' | 'error'
+export type LauncherActionState = 'idle' | 'running' | 'blocked'
 
 export interface Settings {
   ascensionRootPath: string | null
@@ -13,6 +16,10 @@ export interface Settings {
   autoBackupEnabled: boolean
   defaultProfileId: string | null
   devModeEnabled: boolean
+  maintainerModeEnabled: boolean
+  onboardingCompleted: boolean
+  selectedPackId: string | null
+  gameExecutablePath: string | null
   updateChannel: UpdateChannel
   lastUpdateCheckAt: string | null
   lastUpdateError: string | null
@@ -164,6 +171,54 @@ export interface ScanStateResponse {
   interruptedOperation: PendingOperationSummary | null
 }
 
+export interface LauncherPackMember {
+  addonId: string
+  displayName: string
+  installFolder: string
+  required: boolean
+  installed: boolean
+  currentVersion: string | null
+  latestVersion: string | null
+  updateAvailable: boolean
+}
+
+export interface CuratedPackSummary {
+  packId: string
+  name: string
+  description: string
+  defaultChannel: Channel
+  recoveryLabel: string | null
+  recoveryDescription: string | null
+  installedCount: number
+  totalCount: number
+  members: LauncherPackMember[]
+}
+
+export interface LauncherPathHealth {
+  configured: boolean
+  ascensionRootPath: string | null
+  addonsPath: string | null
+  savedVariablesPath: string | null
+  gameExecutablePath: string | null
+  detectedCandidates: DetectPathCandidate[]
+}
+
+export interface LauncherStateResponse {
+  settings: Settings
+  setupStatus: LauncherSetupStatus
+  packStatus: PackStatus
+  actionState: LauncherActionState
+  pack: CuratedPackSummary | null
+  pathHealth: LauncherPathHealth
+  updatesAvailable: number
+  lastSuccessfulSyncAt: string | null
+  lastKnownGoodSnapshot: SnapshotSummary | null
+  recoverySnapshots: SnapshotSummary[]
+  unmanagedCollisions: LiveFolderState[]
+  interruptedOperation: PendingOperationSummary | null
+  errorMessage: string | null
+}
+
 export interface SaveSettingsRequest {
   ascensionRootPath?: string | null
   addonsPath?: string | null
@@ -172,8 +227,28 @@ export interface SaveSettingsRequest {
   autoBackupEnabled?: boolean | null
   defaultProfileId?: string | null
   devModeEnabled?: boolean | null
+  maintainerModeEnabled?: boolean | null
+  onboardingCompleted?: boolean | null
+  selectedPackId?: string | null
+  gameExecutablePath?: string | null
   updateChannel?: UpdateChannel | null
   updateManifestOverride?: string | null
+}
+
+export interface RunInitialSetupRequest {
+  ascensionRootPath?: string | null
+  addonsPath?: string | null
+  savedVariablesPath?: string | null
+  gameExecutablePath?: string | null
+  selectedPackId?: string | null
+}
+
+export interface RestoreLastKnownGoodRequest {
+  previewOnly?: boolean | null
+}
+
+export interface SetMaintainerModeRequest {
+  enabled: boolean
 }
 
 export interface RegisterSourceRequest {
