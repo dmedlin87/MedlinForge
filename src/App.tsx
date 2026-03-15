@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   AlertTriangle,
   Boxes,
@@ -60,6 +60,8 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [autoSetupAttempted, setAutoSetupAttempted] = useState(false)
+  const [autoSetupFailed, setAutoSetupFailed] = useState(false)
+  const setupInProgress = useRef(false)
 
   const maintainerMode = launcher?.settings.maintainerModeEnabled ?? false
   const screens = maintainerMode ? [...playerScreens, ...maintainerScreens] : playerScreens
@@ -107,18 +109,29 @@ function App() {
   }, [refresh])
 
   const completeSetup = useCallback(async (candidate?: DetectPathCandidate) => {
-    const next = await run(
-      'setup',
-      () =>
-        api.runInitialSetup({
-          ascensionRootPath: candidate?.ascensionRootPath ?? settingsDraft.ascensionRootPath ?? null,
-          addonsPath: candidate?.addonsPath ?? settingsDraft.addonsPath ?? null,
-          savedVariablesPath: candidate?.savedVariablesPath ?? settingsDraft.savedVariablesPath ?? null,
-          gameExecutablePath: settingsDraft.gameExecutablePath ?? null,
-        }),
-      'Launcher setup saved.',
-    )
-    if (next) setLauncher(next)
+    if (setupInProgress.current) return
+    setupInProgress.current = true
+    try {
+      const next = await run(
+        'setup',
+        () =>
+          api.runInitialSetup({
+            ascensionRootPath: candidate?.ascensionRootPath ?? settingsDraft.ascensionRootPath ?? null,
+            addonsPath: candidate?.addonsPath ?? settingsDraft.addonsPath ?? null,
+            savedVariablesPath: candidate?.savedVariablesPath ?? settingsDraft.savedVariablesPath ?? null,
+            gameExecutablePath: settingsDraft.gameExecutablePath ?? null,
+          }),
+        'Launcher setup saved.',
+      )
+      if (next) {
+        setLauncher(next)
+        setAutoSetupFailed(false)
+      } else {
+        setAutoSetupFailed(true)
+      }
+    } finally {
+      setupInProgress.current = false
+    }
   }, [settingsDraft])
 
   useEffect(() => {
@@ -131,10 +144,32 @@ function App() {
     ) {
       setAutoSetupAttempted(true)
       void (async () => {
-        await completeSetup(launcher.pathHealth.detectedCandidates[0])
+        if (setupInProgress.current) return
+        setupInProgress.current = true
+        try {
+          const next = await run(
+            'setup',
+            () =>
+              api.runInitialSetup({
+                ascensionRootPath: launcher.pathHealth.detectedCandidates[0].ascensionRootPath,
+                addonsPath: launcher.pathHealth.detectedCandidates[0].addonsPath,
+                savedVariablesPath: launcher.pathHealth.detectedCandidates[0].savedVariablesPath,
+                gameExecutablePath: null,
+              }),
+            'Launcher setup saved.',
+          )
+          if (next) {
+            setLauncher(next)
+            setAutoSetupFailed(false)
+          } else {
+            setAutoSetupFailed(true)
+          }
+        } finally {
+          setupInProgress.current = false
+        }
       })()
     }
-  }, [launcher, autoSetupAttempted, completeSetup])
+  }, [launcher, autoSetupAttempted])
 
   async function run<T>(label: string, action: () => Promise<T>, success?: string) {
     try {
@@ -144,7 +179,14 @@ function App() {
       if (success) setNotice(success)
       return result
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : `${label} failed.`)
+      const message = caught instanceof Error
+        ? caught.message
+        : typeof caught === 'string'
+          ? caught
+          : typeof caught === 'object' && caught !== null && 'message' in caught
+            ? String((caught as { message: unknown }).message)
+            : `${label} failed.`
+      setError(`${label.charAt(0).toUpperCase() + label.slice(1)} failed: ${message}`)
       return null
     } finally {
       setWorking(null)
@@ -254,11 +296,24 @@ function App() {
                       </button>
                     ))}
                     {launcher.pathHealth.detectedCandidates.length > 1 ? <p className="text-sm text-[#d0c0ae]">Select an install, then use Complete Setup.</p> : null}
+                    {autoSetupFailed ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <p className="text-sm text-[#e8a87c]">Auto-setup did not succeed. You can retry or configure paths manually in Settings.</p>
+                        <button className="button-secondary" disabled={working !== null} onClick={() => {
+                          const candidate = launcher.pathHealth.detectedCandidates.find((entry) => entry.ascensionRootPath === selectedCandidate) ?? launcher.pathHealth.detectedCandidates[0]
+                          void completeSetup(candidate)
+                        }}>Retry Setup</button>
+                        <button className="button-secondary" disabled={working !== null} onClick={() => changeScreen('settings')}>Open Settings</button>
+                      </div>
+                    ) : null}
                   </div>
                 ) : (
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <p className="text-sm text-[#d0c0ae]">Enter the Ascension root, AddOns, and SavedVariables paths manually in Settings.</p>
-                    <button className="button-primary" onClick={() => changeScreen('settings')}>Open Settings</button>
+                  <div className="grid gap-3">
+                    <p className="text-sm text-[#d0c0ae]">BronzeForge searched common locations but could not find an Ascension installation. Enter the paths manually in Settings, or install Ascension and retry.</p>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button className="button-primary" onClick={() => changeScreen('settings')}>Open Settings</button>
+                      <button className="button-secondary" disabled={working !== null} onClick={() => void refresh(true)}>Re-scan</button>
+                    </div>
                   </div>
                 )}
               </Card>

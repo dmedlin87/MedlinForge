@@ -70,9 +70,9 @@ function iso(hoursAgo = 0): string {
 
 function baseSettings(): ScanStateResponse['settings'] {
   return {
-    ascensionRootPath: 'C:\\Games\\Ascension',
-    addonsPath: 'C:\\Games\\Ascension\\Interface\\AddOns',
-    savedVariablesPath: 'C:\\Games\\Ascension\\WTF\\Account\\SavedVariables',
+    ascensionRootPath: 'C:\\Program Files\\Ascension Launcher\\resources\\client',
+    addonsPath: 'C:\\Program Files\\Ascension Launcher\\resources\\client\\Interface\\AddOns',
+    savedVariablesPath: 'C:\\Program Files\\Ascension Launcher\\resources\\client\\WTF\\Account\\SavedVariables',
     backupRetentionCount: 20,
     autoBackupEnabled: true,
     defaultProfileId: 'profile-pack',
@@ -176,7 +176,9 @@ function makeSnapshots(addonCount: number): SnapshotSummary[] {
 
 function makeCandidates(count: number): DetectPathCandidate[] {
   return Array.from({ length: count }, (_, index) => {
-    const root = index === 0 ? 'C:\\Games\\Ascension' : `D:\\Games\\Ascension-${index + 1}`
+    const root = index === 0
+      ? 'C:\\Program Files\\Ascension Launcher\\resources\\client'
+      : `D:\\Program Files\\Ascension Launcher-${index + 1}\\resources\\client`
     return {
       label: index === 0 ? 'Primary Ascension Install' : `Ascension Install ${index + 1}`,
       confidence: 'high',
@@ -577,7 +579,7 @@ async function invokeOrDemo<T>(command: string, payload?: Record<string, unknown
     case 'launch_game':
       return (demoStore.settings.gameExecutablePath ?? 'C:\\Games\\Ascension\\Wow.exe') as T
     case 'open_addons_folder':
-      return (demoStore.settings.addonsPath ?? 'C:\\Games\\Ascension\\Interface\\AddOns') as T
+      return (demoStore.settings.addonsPath ?? 'C:\\Program Files\\Ascension Launcher\\resources\\client\\Interface\\AddOns') as T
     case 'set_maintainer_mode': {
       const request = (payload?.request ?? {}) as SetMaintainerModeRequest
       demoStore.settings = {

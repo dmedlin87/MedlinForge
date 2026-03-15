@@ -218,10 +218,29 @@ impl ManagerService {
             PathBuf::from(r"C:\Program Files (x86)"),
         ];
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            roots.push(PathBuf::from(local_app_data));
+            roots.push(PathBuf::from(&local_app_data));
+            roots.push(PathBuf::from(&local_app_data).join("Programs"));
+        }
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            roots.push(PathBuf::from(app_data));
         }
         if let Ok(user_profile) = std::env::var("USERPROFILE") {
-            roots.push(PathBuf::from(user_profile).join("Games"));
+            let user = PathBuf::from(&user_profile);
+            roots.push(user.join("Games"));
+            roots.push(user.join("Desktop"));
+            roots.push(user.join("Downloads"));
+        }
+        if let Ok(program_data) = std::env::var("PROGRAMDATA") {
+            roots.push(PathBuf::from(program_data));
+        }
+        // Check all fixed drive letters for common game folders
+        for letter in b'D'..=b'Z' {
+            let drive = format!("{}:\\", letter as char);
+            let drive_path = PathBuf::from(&drive);
+            if drive_path.exists() {
+                roots.push(drive_path.join("Games"));
+                roots.push(drive_path.join("Ascension"));
+            }
         }
 
         let candidates = detect_path_candidates(&roots)?;
@@ -410,9 +429,11 @@ impl ManagerService {
                 }
             })
             .ok_or_else(|| {
-                ServiceError::Message(
-                    "Initial setup needs a selected Ascension install path".to_string(),
-                )
+                ServiceError::Message(format!(
+                    "Could not resolve Ascension install path. {} candidate(s) detected. \
+                     Please select or provide an install path.",
+                    detected.len(),
+                ))
             })?;
         let resolved_addons = request
             .addons_path
@@ -424,10 +445,7 @@ impl ManagerService {
                     .map(|candidate| candidate.addons_path.clone())
             })
             .unwrap_or_else(|| {
-                Path::new(&resolved_root)
-                    .join("Interface")
-                    .join("AddOns")
-                    .to_string_lossy()
+                r"C:\Program Files\Ascension Launcher\resources\client\Interface\AddOns"
                     .to_string()
             });
         let resolved_saved_variables = request
@@ -661,10 +679,24 @@ impl ManagerService {
                 })
             });
         if let Some(addons_path) = addons.as_ref() {
-            fs::create_dir_all(addons_path)?;
+            if let Err(err) = fs::create_dir_all(addons_path) {
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    return Err(ServiceError::Message(format!(
+                        "Cannot write to AddOns folder at '{}': permission denied. \
+                         Try choosing an install outside of Program Files, or run as administrator.",
+                        addons_path
+                    )));
+                }
+                return Err(ServiceError::Message(format!(
+                    "Could not create AddOns folder at '{}': {}",
+                    addons_path, err
+                )));
+            }
         }
+        // SavedVariables folder is created by the game on first run;
+        // best-effort creation here — do not block setup on failure.
         if let Some(saved_path) = saved_variables.as_ref() {
-            fs::create_dir_all(saved_path)?;
+            let _ = fs::create_dir_all(saved_path);
         }
         let requested_manifest_override = request
             .update_manifest_override
@@ -3329,13 +3361,14 @@ fn detect_path_candidates(roots: &[PathBuf]) -> ServiceResult<Vec<DetectPathCand
             continue;
         }
 
+        // Check if this root itself is a game folder
+        let direct_addons = root.join("Interface").join("AddOns");
+        push_detect_candidate(&mut candidates, &mut seen, &direct_addons);
+
         for addons_path in [
-            root.join("Ascension").join("Interface").join("AddOns"),
-            root.join("Project Ascension")
-                .join("Interface")
-                .join("AddOns"),
             root.join("Ascension Launcher")
-                .join("game")
+                .join("resources")
+                .join("client")
                 .join("Interface")
                 .join("AddOns"),
         ] {
@@ -3377,6 +3410,13 @@ fn find_launcher_addon_dirs(resources_path: &Path) -> ServiceResult<Vec<PathBuf>
             continue;
         };
         if !path_name_eq(parent, "Interface") {
+            continue;
+        }
+
+        let Some(grandparent) = parent.parent() else {
+            continue;
+        };
+        if !path_name_eq(grandparent, "client") {
             continue;
         }
 
