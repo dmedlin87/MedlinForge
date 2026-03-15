@@ -13,7 +13,8 @@
     "tauri:dev": "node scripts/tauri-runner.mjs dev",
     "tauri:build": "node scripts/tauri-runner.mjs build",
     "test": "vitest run",
-    "test:update-manifests": "node --test scripts/build-update-manifests.test.mjs"
+    "test:update-manifests": "node --test scripts/build-update-manifests.test.mjs",
+    "tag-addon-release": "node scripts/tag-addon-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

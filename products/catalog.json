@@ -17,6 +17,14 @@
         {
           "productId": "bronze-bars",
           "required": true
+        },
+        {
+          "productId": "ding-timer",
+          "required": true
+        },
+        {
+          "productId": "quest-share",
+          "required": true
         }
       ]
     }
@@ -49,6 +57,26 @@
       "repository": "dmedlin87/BronzeBars",
       "channels": ["stable"],
       "assetName": "BronzeBars.zip",
+      "installKind": "addon-folder-zip",
+      "platform": "windows-any"
+    },
+    {
+      "id": "ding-timer",
+      "name": "Ding Timer",
+      "type": "addon",
+      "repository": "dmedlin87/DingTimer",
+      "channels": ["stable"],
+      "assetName": "DingTimer.zip",
+      "installKind": "addon-folder-zip",
+      "platform": "windows-any"
+    },
+    {
+      "id": "quest-share",
+      "name": "Quest Share",
+      "type": "addon",
+      "repository": "dmedlin87/quest-share",
+      "channels": ["stable"],
+      "assetName": "QuestShare.zip",
       "installKind": "addon-folder-zip",
       "platform": "windows-any"
     }
