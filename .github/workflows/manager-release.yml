@@ -31,6 +31,12 @@ jobs:
       - name: Preflight
         run: npm run doctor:windows
 
+      - name: Test frontend
+        run: npm run test
+
+      - name: Test backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Build NSIS installer
         run: npm run tauri:build
 

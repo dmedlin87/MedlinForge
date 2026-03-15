@@ -2557,7 +2557,13 @@ impl ManagerService {
                     },
                     true,
                     None,
-                    Some(error.to_string()),
+                    Some(match settings.last_update_check_at {
+                        Some(checked_at) => {
+                            let hours = (Utc::now() - checked_at).num_hours();
+                            format!("{error} (catalog last fetched {hours}h ago)")
+                        }
+                        None => format!("{error} (catalog has never been fetched)"),
+                    }),
                 ))
             }
         }
@@ -2832,7 +2838,6 @@ impl ManagerService {
                         row.product_id
                     )));
                 }
-                let _ = row.checked_at;
                 Ok(product)
             })
             .collect()
@@ -2871,8 +2876,6 @@ impl ManagerService {
                         row.pack_id
                     )));
                 }
-                let _ = row.channel;
-                let _ = row.checked_at;
                 Ok(pack)
             })
             .collect()
@@ -3437,13 +3440,6 @@ fn find_launcher_addon_dirs(resources_path: &Path) -> ServiceResult<Vec<PathBuf>
             continue;
         };
         if !path_name_eq(parent, "Interface") {
-            continue;
-        }
-
-        let Some(grandparent) = parent.parent() else {
-            continue;
-        };
-        if !path_name_eq(grandparent, "client") {
             continue;
         }
 

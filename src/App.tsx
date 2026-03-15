@@ -15,6 +15,13 @@ import clsx from 'clsx'
 
 import { api } from './lib/api'
 import { formatBytes, formatWhen } from './lib/format'
+import {
+  getPrimaryAction,
+  isProtectedAddonsPermissionError,
+  labelForPrimary,
+  labelForStatus,
+  toneForStatus,
+} from './features/launcher/domain/launcherLogic'
 import type {
   Channel,
   DetectPathCandidate,
@@ -491,36 +498,6 @@ function State({ icon: Icon, title, body, spin = false }: { icon: typeof AlertTr
 
 function Pill({ tone, children }: { tone: 'success' | 'warning' | 'muted' | 'danger'; children: ReactNode }) {
   return <span className={clsx('inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold', tone === 'success' && 'bg-emerald-500/15 text-emerald-100', tone === 'warning' && 'bg-amber-500/15 text-amber-100', tone === 'danger' && 'bg-rose-500/15 text-rose-100', tone === 'muted' && 'bg-white/10 text-[#e9dcc9]')}>{children}</span>
-}
-
-function getPrimaryAction(launcher: LauncherStateResponse) {
-  if (launcher.setupStatus === 'setup_required') return 'setup'
-  if (launcher.packStatus === 'recovery_needed') return 'recovery'
-  return 'sync'
-}
-
-function labelForPrimary(primary: string, packStatus: LauncherStateResponse['packStatus']) {
-  if (primary === 'setup') return 'Complete Setup'
-  if (primary === 'recovery') return 'Open Recovery'
-  return packStatus === 'update_available' ? 'Sync Pack Updates' : packStatus === 'up_to_date' ? 'Resync Pack' : 'Install Pack'
-}
-
-function labelForStatus(status: LauncherStateResponse['packStatus']) {
-  return status === 'up_to_date' ? 'Up To Date' : status === 'update_available' ? 'Update Available' : status === 'recovery_needed' ? 'Recovery Needed' : status === 'error' ? 'Blocked' : status === 'syncing' ? 'Syncing' : 'Ready To Install'
-}
-
-function toneForStatus(status: LauncherStateResponse['packStatus']) {
-  return status === 'up_to_date' ? 'success' : status === 'update_available' ? 'warning' : status === 'recovery_needed' || status === 'error' ? 'danger' : 'muted'
-}
-
-export function isProtectedAddonsPermissionError(message: string | null) {
-  const normalized = message?.toLowerCase()
-  return Boolean(
-    normalized
-    && normalized.includes('addons folder')
-    && normalized.includes('protected install location')
-    && normalized.includes('administrator'),
-  )
 }
 
 export default App

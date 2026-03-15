@@ -1,7 +1,8 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-import App, { isProtectedAddonsPermissionError } from './App'
+import App from './App'
+import { isProtectedAddonsPermissionError } from './features/launcher/domain/launcherLogic'
 import { __resetDemoApiState } from './lib/api'
 
 beforeEach(() => {
