@@ -51,7 +51,7 @@ function App() {
     updateChannel: 'stable',
   })
   const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
-  const [newProfileName, setNewProfileName] = useState('Brother')
+  const [newProfileName, setNewProfileName] = useState('')
   const [sourcePath, setSourcePath] = useState('')
   const [sourceKind, setSourceKind] = useState<'manifest' | 'local-folder' | 'zip-file'>('manifest')
   const [sourceChannel, setSourceChannel] = useState<Channel>('stable')
@@ -63,6 +63,13 @@ function App() {
 
   const maintainerMode = launcher?.settings.maintainerModeEnabled ?? false
   const screens = maintainerMode ? [...playerScreens, ...maintainerScreens] : playerScreens
+
+  const changeScreen = useCallback((next: Screen) => {
+    setScreen((current) => {
+      if (current === 'recovery' && next !== 'recovery') setRestorePreview(null)
+      return next
+    })
+  }, [])
 
   const refresh = useCallback(async (showSpinner = false) => {
     try {
@@ -146,7 +153,7 @@ function App() {
 
   async function syncPack() {
     const next = await run('sync', () => api.syncCuratedPack(), 'Pack synced.')
-    if (next) setLauncher(next)
+    if (next) await refresh()
   }
 
   async function previewRestore() {
@@ -180,17 +187,17 @@ function App() {
 
   async function toggleMaintainerMode(enabled: boolean) {
     const next = await run('maintainer mode', () => api.setMaintainerMode({ enabled }), enabled ? 'Maintainer mode enabled.' : 'Maintainer mode disabled.')
-    if (next) setLauncher(next)
+    if (next) await refresh()
   }
 
-  if (loading && !launcher) return <Frame screens={screens} screen={screen} onScreen={setScreen}><State icon={Loader2} title="Loading BronzeForge" body="Pulling launcher state." spin /></Frame>
-  if (!launcher) return <Frame screens={screens} screen={screen} onScreen={setScreen}><State icon={AlertTriangle} title="Launcher unavailable" body={error ?? 'BronzeForge could not load.'} /></Frame>
+  if (loading && !launcher) return <Frame screens={screens} screen={screen} onScreen={changeScreen}><State icon={Loader2} title="Loading BronzeForge" body="Pulling launcher state." spin /></Frame>
+  if (!launcher) return <Frame screens={screens} screen={screen} onScreen={changeScreen}><State icon={AlertTriangle} title="Launcher unavailable" body={error ?? 'BronzeForge could not load.'} /></Frame>
 
   const pack = launcher.pack
   const primary = getPrimaryAction(launcher)
 
   return (
-    <Frame screens={screens} screen={screen} onScreen={setScreen}>
+    <Frame screens={screens} screen={screen} onScreen={changeScreen}>
       <div className="space-y-6">
         {error ? <Banner tone="error">{error}</Banner> : null}
         {notice ? <Banner tone="success">{notice}</Banner> : null}
@@ -213,7 +220,7 @@ function App() {
                     }
                     void completeSetup(candidate)
                   } else if (primary === 'recovery') {
-                    setScreen('recovery')
+                    changeScreen('recovery')
                   } else {
                     void syncPack()
                   }
@@ -221,12 +228,14 @@ function App() {
                   {working ? <Loader2 className="size-4 animate-spin" /> : null}
                   {labelForPrimary(primary, launcher.packStatus)}
                 </button>
-                <button className="button-secondary" onClick={() => void run('open addons folder', () => api.openAddonsFolder())}>
-                  <FolderOpen className="size-4" />
-                  Open AddOns Folder
-                </button>
+                {launcher.pathHealth.addonsPath ? (
+                  <button className="button-secondary" disabled={working !== null} onClick={() => void run('open addons folder', () => api.openAddonsFolder())}>
+                    <FolderOpen className="size-4" />
+                    Open AddOns Folder
+                  </button>
+                ) : null}
                 {launcher.pathHealth.gameExecutablePath ? (
-                  <button className="button-secondary" onClick={() => void run('launch game', () => api.launchGame())}>
+                  <button className="button-secondary" disabled={working !== null} onClick={() => void run('launch game', () => api.launchGame())}>
                     <Play className="size-4" />
                     Launch Game
                   </button>
@@ -249,7 +258,7 @@ function App() {
                 ) : (
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <p className="text-sm text-[#d0c0ae]">Enter the Ascension root, AddOns, and SavedVariables paths manually in Settings.</p>
-                    <button className="button-primary" onClick={() => setScreen('settings')}>Open Settings</button>
+                    <button className="button-primary" onClick={() => changeScreen('settings')}>Open Settings</button>
                   </div>
                 )}
               </Card>
@@ -279,7 +288,7 @@ function App() {
           <div className="space-y-6">
             <Card title={pack?.recoveryLabel ?? 'Restore last known good'} subtitle={pack?.recoveryDescription ?? 'Roll back to the latest working pack snapshot.'}>
               <div className="flex flex-wrap items-center gap-3">
-                <button className="button-primary" onClick={() => void previewRestore()}>Preview Restore</button>
+                <button className="button-primary" disabled={working !== null} onClick={() => void previewRestore()}>Preview Restore</button>
                 <p className="text-sm text-[#d0c0ae]">Last known good: {formatWhen(launcher.lastKnownGoodSnapshot?.createdAt ?? null)}</p>
               </div>
             </Card>
@@ -294,8 +303,8 @@ function App() {
                   ))}
                 </div>
                 <div className="mt-5 flex gap-3">
-                  <button className="button-primary" onClick={() => void applyRestore()}>Restore Last Known Good</button>
-                  <button className="button-secondary" onClick={() => setRestorePreview(null)}>Cancel</button>
+                  <button className="button-primary" disabled={working !== null} onClick={() => void applyRestore()}>Restore Last Known Good</button>
+                  <button className="button-secondary" disabled={working !== null} onClick={() => setRestorePreview(null)}>Cancel</button>
                 </div>
               </Card>
             ) : null}
@@ -325,8 +334,8 @@ function App() {
                 <Field label="Game Executable" value={settingsDraft.gameExecutablePath ?? ''} onChange={(value) => setSettingsDraft((current) => ({ ...current, gameExecutablePath: value }))} />
               </div>
               <div className="mt-5 flex flex-wrap gap-3">
-                <button className="button-primary" onClick={() => void saveSettings()}>Save Settings</button>
-                <button className={maintainerMode ? 'button-secondary' : 'button-primary'} onClick={() => void toggleMaintainerMode(!maintainerMode)}>
+                <button className="button-primary" disabled={working !== null} onClick={() => void saveSettings()}>Save Settings</button>
+                <button className={maintainerMode ? 'button-secondary' : 'button-primary'} disabled={working !== null} onClick={() => void toggleMaintainerMode(!maintainerMode)}>
                   {maintainerMode ? 'Disable Maintainer Mode' : 'Enable Maintainer Mode'}
                 </button>
               </div>
@@ -334,7 +343,7 @@ function App() {
           </div>
         ) : null}
 
-        {screen === 'addons' && maintainerMode ? <ListCard title="Managed Addons" items={(advanced?.addons ?? []).map((addon) => `${addon.displayName} · ${addon.currentVersion ?? 'not installed'}`)} /> : null}
+        {screen === 'addons' && maintainerMode ? <ListCard title="Managed Addons" items={(advanced?.addons ?? []).map((addon) => ({ id: addon.id, label: `${addon.displayName} · ${addon.currentVersion ?? 'not installed'}` }))} /> : null}
         {screen === 'profiles' && maintainerMode ? (
           <div className="space-y-6">
             <Card title="Profiles" subtitle="Advanced-only profile tooling.">
@@ -346,8 +355,8 @@ function App() {
                       <p className="text-xs text-[#d0c0ae]">Last used {formatWhen(profile.lastUsedAt)}</p>
                     </div>
                     <div className="flex gap-2">
-                      <button className="button-secondary" onClick={() => void run('switch profile', () => api.switchProfile({ profileId: profile.id }), 'Profile switched.')}>Switch</button>
-                      <button className="button-secondary" onClick={() => void run('duplicate profile', () => api.duplicateProfile({ profileId: profile.id }), 'Profile duplicated.')}>Duplicate</button>
+                      <button className="button-secondary" disabled={working !== null} onClick={async () => { const result = await run('switch profile', () => api.switchProfile({ profileId: profile.id }), 'Profile switched.'); if (result) setAdvanced(result) }}>Switch</button>
+                      <button className="button-secondary" disabled={working !== null} onClick={async () => { const result = await run('duplicate profile', () => api.duplicateProfile({ profileId: profile.id }), 'Profile duplicated.'); if (result) setAdvanced(result) }}>Duplicate</button>
                     </div>
                   </div>
                 ))}
@@ -356,7 +365,7 @@ function App() {
             <Card title="Create Profile" subtitle="Only use this when pack branching is intentional.">
               <div className="flex flex-wrap gap-3">
                 <Field label="Profile Name" value={newProfileName} onChange={setNewProfileName} />
-                <button className="button-primary" onClick={() => void run('create profile', () => api.createProfile({ name: newProfileName, notes: 'Curated BronzeForge profile.', selections: (advanced?.addons ?? []).map((addon) => ({ addonId: addon.id, enabled: addon.isCore, channelOverride: null })) }), 'Profile created.')}>Create Profile</button>
+                <button className="button-primary" disabled={working !== null} onClick={async () => { const result = await run('create profile', () => api.createProfile({ name: newProfileName, notes: 'Curated BronzeForge profile.', selections: (advanced?.addons ?? []).map((addon) => ({ addonId: addon.id, enabled: addon.isCore, channelOverride: null })) }), 'Profile created.'); if (result) { setAdvanced(result); setNewProfileName('') } }}>Create Profile</button>
               </div>
             </Card>
           </div>
@@ -369,7 +378,7 @@ function App() {
               <Field label="Source Path" value={sourcePath} onChange={setSourcePath} />
             </div>
             <div className="mt-5">
-              <button className="button-primary" onClick={() => void run('register source', () => api.registerSource({ sourceKind, path: sourcePath, channel: sourceChannel, core: false }), 'Source registered.')}>Register Source</button>
+              <button className="button-primary" disabled={working !== null} onClick={async () => { const result = await run('register source', () => api.registerSource({ sourceKind, path: sourcePath, channel: sourceChannel, core: false }), 'Source registered.'); if (result) setAdvanced(result) }}>Register Source</button>
             </div>
           </Card>
         ) : null}
@@ -394,8 +403,8 @@ function SelectField({ label, value, onChange, options }: { label: string; value
   return <label className="flex flex-col gap-2 text-sm text-[#d0c0ae]">{label}<select className="input" value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select></label>
 }
 
-function ListCard({ title, items }: { title: string; items: string[] }) {
-  return <Card title={title} subtitle="Advanced visibility only.">{items.length ? <div className="space-y-3">{items.map((item) => <div key={item} className="rounded-3xl border border-white/10 bg-black/20 p-4 text-sm text-[#f8eee2]">{item}</div>)}</div> : <p className="text-sm text-[#d0c0ae]">Nothing loaded.</p>}</Card>
+function ListCard({ title, items }: { title: string; items: Array<{ id: string; label: string }> }) {
+  return <Card title={title} subtitle="Advanced visibility only.">{items.length ? <div className="space-y-3">{items.map((item) => <div key={item.id} className="rounded-3xl border border-white/10 bg-black/20 p-4 text-sm text-[#f8eee2]">{item.label}</div>)}</div> : <p className="text-sm text-[#d0c0ae]">Nothing loaded.</p>}</Card>
 }
 
 function Banner({ tone, children }: { tone: 'success' | 'error'; children: ReactNode }) {
