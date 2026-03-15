@@ -549,12 +549,30 @@ impl ManagerService {
         }
 
         let profile_id = self.ensure_pack_profile(&pack)?;
-        let response = self.sync_profile(SyncProfileRequest {
-            profile_id: profile_id.clone(),
-            preview_only: Some(false),
-            safe_mode: Some(false),
-            isolate_addon_id: None,
-        })?;
+        let response = self
+            .sync_profile(SyncProfileRequest {
+                profile_id: profile_id.clone(),
+                preview_only: Some(false),
+                safe_mode: Some(false),
+                isolate_addon_id: None,
+            })
+            .map_err(|error| match &error {
+                ServiceError::Io(io_error)
+                    if io_error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    let addons_path = settings
+                        .addons_path
+                        .clone()
+                        .unwrap_or_else(|| "<not configured>".to_string());
+                    ServiceError::Message(format!(
+                        "Cannot write to AddOns folder at '{}': permission denied. \
+                         Close the game/launcher and run BronzeForge as administrator, \
+                         or move the install outside Program Files.",
+                        addons_path
+                    ))
+                }
+                _ => error,
+            })?;
         if !response.ok || !response.applied {
             let blocker_message = response
                 .preview
