@@ -564,10 +564,9 @@ impl ManagerService {
                         .addons_path
                         .clone()
                         .unwrap_or_else(|| "<not configured>".to_string());
-                    ServiceError::Message(format!(
-                        "Cannot write to AddOns folder at '{}': permission denied. \
-                         Close the game and launcher, then try again.",
-                        addons_path
+                    ServiceError::Message(addons_permission_denied_message(
+                        &addons_path,
+                        "write to",
                     ))
                 }
                 _ => error,
@@ -696,19 +695,7 @@ impl ManagerService {
                 })
             });
         if let Some(addons_path) = addons.as_ref() {
-            if let Err(err) = fs::create_dir_all(addons_path) {
-                if err.kind() == std::io::ErrorKind::PermissionDenied {
-                    return Err(ServiceError::Message(format!(
-                        "Cannot create AddOns folder at '{}': permission denied. \
-                         Close the game and launcher, then try again.",
-                        addons_path
-                    )));
-                }
-                return Err(ServiceError::Message(format!(
-                    "Could not create AddOns folder at '{}': {}",
-                    addons_path, err
-                )));
-            }
+            ensure_addons_path_writable(addons_path)?;
         }
         // SavedVariables folder is created by the game on first run;
         // best-effort creation here — do not block setup on failure.
@@ -1104,6 +1091,12 @@ impl ManagerService {
             });
         }
 
+        let addons_path = self
+            .load_settings()?
+            .addons_path
+            .ok_or_else(|| ServiceError::Message("AddOns path is required".to_string()))?;
+        ensure_addons_path_writable(&addons_path)?;
+
         let snapshot_id = self.create_snapshot_for_preview(
             SnapshotType::Preflight,
             &preview,
@@ -1205,7 +1198,23 @@ impl ManagerService {
             &live_preview,
             Some("Pre-restore snapshot".to_string()),
         )?;
-        self.restore_snapshot_internal(&request.snapshot_id)?;
+        let addons_path = self
+            .load_settings()?
+            .addons_path
+            .clone()
+            .unwrap_or_else(|| "<not configured>".to_string());
+        self.restore_snapshot_internal(&request.snapshot_id)
+            .map_err(|error| match &error {
+                ServiceError::Io(io_error)
+                    if io_error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    ServiceError::Message(addons_permission_denied_message(
+                        &addons_path,
+                        "restore",
+                    ))
+                }
+                _ => error,
+            })?;
         self.insert_log(
             "restoreSnapshot",
             "success",
@@ -2326,6 +2335,7 @@ impl ManagerService {
         let addons_path = settings.addons_path.ok_or_else(|| {
             ServiceError::Message("Configure the AddOns path before restore".to_string())
         })?;
+        ensure_addons_path_writable(&addons_path)?;
         let snapshot_root = PathBuf::from(self.load_snapshot_path(snapshot_id)?);
         for addon in self.load_addons()? {
             let live_path = Path::new(&addons_path).join(&addon.install_folder);
@@ -3557,6 +3567,176 @@ fn copy_dir_all(source: &Path, destination: &Path) -> ServiceResult<()> {
     Ok(())
 }
 
+fn ensure_addons_path_writable(addons_path: &str) -> ServiceResult<()> {
+    match probe_addons_writable(addons_path) {
+        Ok(()) => return Ok(()),
+        Err(first_error) => {
+            if !is_windows_protected_install_path(Path::new(addons_path)) {
+                return Err(first_error);
+            }
+            // The path is under Program Files — attempt a one-time elevated
+            // permission grant so future operations work without admin rights.
+            if let Err(fix_error) = elevate_addons_permissions(addons_path) {
+                // If the user declined UAC or it failed, report the original error
+                // with context about the fix attempt.
+                return Err(ServiceError::Message(format!(
+                    "Cannot write to AddOns folder at '{}': permission denied. \
+                     An automatic permission fix was attempted but failed ({}). \
+                     To fix manually, run an elevated terminal and execute: \
+                     icacls \"{}\" /grant *S-1-5-32-545:(OI)(CI)M /T",
+                    addons_path, fix_error, addons_path
+                )));
+            }
+            // Retry after the elevated fix.
+            probe_addons_writable(addons_path)
+        }
+    }
+}
+
+fn probe_addons_writable(addons_path: &str) -> ServiceResult<()> {
+    let addons_root = Path::new(addons_path);
+    fs::create_dir_all(addons_root)
+        .map_err(|error| map_addons_path_error(addons_path, "create", error))?;
+
+    let probe_path = addons_root.join(format!(".bronze-forge-write-test-{}", Uuid::new_v4()));
+    fs::write(&probe_path, b"probe")
+        .map_err(|error| map_addons_path_error(addons_path, "write to", error))?;
+
+    match fs::remove_file(&probe_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ServiceError::Io(error)),
+    }
+}
+
+/// Spawn an elevated process that grants the Users group modify access to the
+/// AddOns directory tree. On Windows this uses `ShellExecuteW` with the "runas"
+/// verb, which triggers a single UAC consent prompt. On non-Windows this is a
+/// no-op (Program Files paths don't exist there).
+fn elevate_addons_permissions(addons_path: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = addons_path;
+        return Err("elevated permission fix is only available on Windows".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        fn to_wide(s: &str) -> Vec<u16> {
+            OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        // Grant the built-in Users group (S-1-5-32-545) Modify access,
+        // inheritable to child objects, recursively.
+        let params = format!(
+            "/c icacls \"{}\" /grant *S-1-5-32-545:(OI)(CI)M /T",
+            addons_path
+        );
+
+        let verb = to_wide("runas");
+        let file = to_wide("cmd.exe");
+        let parameters = to_wide(&params);
+
+        // SAFETY: calling ShellExecuteW with valid wide-string pointers and a
+        // null hwnd; the OS handles the UAC prompt.
+        let result = unsafe {
+            winapi_shell_execute(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                parameters.as_ptr(),
+                std::ptr::null(),
+                0, // SW_HIDE
+            )
+        };
+        // ShellExecuteW returns an HINSTANCE > 32 on success.
+        if (result as usize) <= 32 {
+            return Err(format!("ShellExecuteW returned {}", result as usize));
+        }
+        // Give the elevated process time to complete.
+        std::thread::sleep(Duration::from_secs(3));
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn winapi_shell_execute(
+    hwnd: *mut std::ffi::c_void,
+    verb: *const u16,
+    file: *const u16,
+    parameters: *const u16,
+    directory: *const u16,
+    show_cmd: i32,
+) -> *mut std::ffi::c_void {
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> *mut std::ffi::c_void;
+    }
+    unsafe { ShellExecuteW(hwnd, verb, file, parameters, directory, show_cmd) }
+}
+
+fn map_addons_path_error(
+    addons_path: &str,
+    action: &str,
+    error: std::io::Error,
+) -> ServiceError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        return ServiceError::Message(addons_permission_denied_message(addons_path, action));
+    }
+
+    ServiceError::Message(format!(
+        "Could not {} AddOns folder at '{}': {}",
+        action, addons_path, error
+    ))
+}
+
+fn addons_permission_denied_message(addons_path: &str, action: &str) -> String {
+    format!(
+        "Cannot {} AddOns folder at '{}': permission denied. \
+         Close the game and launcher, then try again.",
+        action, addons_path
+    )
+}
+
+fn is_windows_protected_install_path(path: &Path) -> bool {
+    let candidate = normalize_windows_path_for_comparison(path);
+    windows_protected_roots().into_iter().any(|root| {
+        let root = normalize_windows_path_for_comparison(&root);
+        candidate == root || candidate.starts_with(&(root + "\\"))
+    })
+}
+
+fn windows_protected_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(value) = std::env::var_os(key) {
+            roots.push(PathBuf::from(value));
+        }
+    }
+    if roots.is_empty() {
+        roots.push(PathBuf::from(r"C:\Program Files"));
+        roots.push(PathBuf::from(r"C:\Program Files (x86)"));
+    }
+    roots
+}
+
+fn normalize_windows_path_for_comparison(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
 /// Move a directory, falling back to copy+delete when rename fails
 /// (e.g. across volumes or NTFS security boundaries like Program Files).
 fn move_dir(source: &Path, destination: &Path) -> ServiceResult<()> {
@@ -3615,7 +3795,9 @@ fn zip_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{ManagerService, detect_path_candidates};
+    use super::{
+        ManagerService, detect_path_candidates, is_windows_protected_install_path,
+    };
     use crate::models::{
         Channel, CreateProfileRequest, InstallAddonRequest, ProfileSelectionInput,
         RegisterSourceRequest, SaveSettingsRequest, SourceKind, SyncProfileRequest,
@@ -3846,5 +4028,12 @@ mod tests {
                     .saved_variables_path
                     .ends_with("epoch_live\\WTF\\Account\\SavedVariables")
         }));
+    }
+
+    #[test]
+    fn protected_addons_paths_get_admin_guidance() {
+        let path = Path::new(r"C:\Program Files\Ascension Launcher\resources\client\Interface\AddOns");
+
+        assert!(is_windows_protected_install_path(path));
     }
 }

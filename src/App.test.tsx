@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
-import App from './App'
+import App, { isProtectedAddonsPermissionError } from './App'
 import { __resetDemoApiState } from './lib/api'
 
 beforeEach(() => {
@@ -65,4 +65,13 @@ test('maintainer mode hides and reveals advanced screens', async () => {
   expect(await screen.findByRole('button', { name: /^Addons$/i })).toBeInTheDocument()
   expect(await screen.findByRole('button', { name: /^Profiles$/i })).toBeInTheDocument()
   expect(await screen.findByRole('button', { name: /^Developer$/i })).toBeInTheDocument()
+})
+
+test('detects protected AddOns permission guidance', () => {
+  expect(
+    isProtectedAddonsPermissionError(
+      "Sync failed: Cannot write to AddOns folder at 'C:\\Program Files\\Ascension Launcher\\resources\\client\\Interface\\AddOns': Windows denied access to a protected install location. If Ascension is installed under Program Files, run BronzeForge as Administrator or move the game to a user-writable folder. If the game or launcher is open, close them and try again.",
+    ),
+  ).toBe(true)
+  expect(isProtectedAddonsPermissionError('Sync failed: permission denied.')).toBe(false)
 })

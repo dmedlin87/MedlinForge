@@ -65,6 +65,7 @@ function App() {
 
   const maintainerMode = launcher?.settings.maintainerModeEnabled ?? false
   const screens = maintainerMode ? [...playerScreens, ...maintainerScreens] : playerScreens
+  const showProtectedAddonsRecovery = isProtectedAddonsPermissionError(error)
 
   const changeScreen = useCallback((next: Screen) => {
     setScreen((current) => {
@@ -242,6 +243,24 @@ function App() {
     <Frame screens={screens} screen={screen} onScreen={changeScreen}>
       <div className="space-y-6">
         {error ? <Banner tone="error">{error}</Banner> : null}
+        {showProtectedAddonsRecovery ? (
+          <Banner tone="error">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p>BronzeForge needs elevated access for this AddOns location. Run BronzeForge as Administrator, or update the AddOns path to a user-writable install in Settings.</p>
+              <div className="flex flex-wrap gap-3">
+                <button className="button-secondary" disabled={working !== null} onClick={() => changeScreen('settings')}>
+                  Review Paths
+                </button>
+                {launcher.pathHealth.addonsPath ? (
+                  <button className="button-secondary" disabled={working !== null} onClick={() => void run('open addons folder', () => api.openAddonsFolder())}>
+                    <FolderOpen className="size-4" />
+                    Open AddOns Folder
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </Banner>
+        ) : null}
         {notice ? <Banner tone="success">{notice}</Banner> : null}
 
         {screen === 'home' ? (
@@ -492,6 +511,16 @@ function labelForStatus(status: LauncherStateResponse['packStatus']) {
 
 function toneForStatus(status: LauncherStateResponse['packStatus']) {
   return status === 'up_to_date' ? 'success' : status === 'update_available' ? 'warning' : status === 'recovery_needed' || status === 'error' ? 'danger' : 'muted'
+}
+
+export function isProtectedAddonsPermissionError(message: string | null) {
+  const normalized = message?.toLowerCase()
+  return Boolean(
+    normalized
+    && normalized.includes('addons folder')
+    && normalized.includes('protected install location')
+    && normalized.includes('administrator'),
+  )
 }
 
 export default App
