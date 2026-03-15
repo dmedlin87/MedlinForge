@@ -59,10 +59,6 @@ interface DemoStore {
   managerUpdate: ManagerUpdateStatus | null
 }
 
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
-}
-
 function iso(hoursAgo = 0): string {
   return new Date(Date.now() - hoursAgo * 60 * 60 * 1000).toISOString()
 }
@@ -198,6 +194,21 @@ function makeCandidates(count: number): DetectPathCandidate[] {
   })
 }
 
+function makeUninstalledAddons(): DemoAddonState[] {
+  return [
+    makeAddon('bronzeforge-ui', 'BronzeForge UI', 'BronzeForgeUI', null, '1.5.0'),
+    makeAddon('bronze-bars', 'Bronze Bars', 'BronzeBars', null, '0.9.7'),
+  ]
+}
+
+function clearSetupPaths(settings: Settings): void {
+  settings.ascensionRootPath = null
+  settings.addonsPath = null
+  settings.savedVariablesPath = null
+  settings.gameExecutablePath = null
+  settings.onboardingCompleted = false
+}
+
 function createDemoStore(scenario: DemoScenario): DemoStore {
   const settings = baseSettings()
   let addons: DemoAddonState[] = [
@@ -216,48 +227,24 @@ function createDemoStore(scenario: DemoScenario): DemoStore {
   }
 
   if (scenario === 'installable-pack') {
-    addons = [
-      makeAddon('bronzeforge-ui', 'BronzeForge UI', 'BronzeForgeUI', null, '1.5.0'),
-      makeAddon('bronze-bars', 'Bronze Bars', 'BronzeBars', null, '0.9.7'),
-    ]
+    addons = makeUninstalledAddons()
   }
 
   if (scenario === 'single-setup') {
-    settings.ascensionRootPath = null
-    settings.addonsPath = null
-    settings.savedVariablesPath = null
-    settings.gameExecutablePath = null
-    settings.onboardingCompleted = false
-    addons = [
-      makeAddon('bronzeforge-ui', 'BronzeForge UI', 'BronzeForgeUI', null, '1.5.0'),
-      makeAddon('bronze-bars', 'Bronze Bars', 'BronzeBars', null, '0.9.7'),
-    ]
+    clearSetupPaths(settings)
+    addons = makeUninstalledAddons()
   }
 
   if (scenario === 'multiple-setup') {
-    settings.ascensionRootPath = null
-    settings.addonsPath = null
-    settings.savedVariablesPath = null
-    settings.gameExecutablePath = null
-    settings.onboardingCompleted = false
+    clearSetupPaths(settings)
     detectedCandidates = makeCandidates(2)
-    addons = [
-      makeAddon('bronzeforge-ui', 'BronzeForge UI', 'BronzeForgeUI', null, '1.5.0'),
-      makeAddon('bronze-bars', 'Bronze Bars', 'BronzeBars', null, '0.9.7'),
-    ]
+    addons = makeUninstalledAddons()
   }
 
   if (scenario === 'manual-setup') {
-    settings.ascensionRootPath = null
-    settings.addonsPath = null
-    settings.savedVariablesPath = null
-    settings.gameExecutablePath = null
-    settings.onboardingCompleted = false
+    clearSetupPaths(settings)
     detectedCandidates = []
-    addons = [
-      makeAddon('bronzeforge-ui', 'BronzeForge UI', 'BronzeForgeUI', null, '1.5.0'),
-      makeAddon('bronze-bars', 'Bronze Bars', 'BronzeBars', null, '0.9.7'),
-    ]
+    addons = makeUninstalledAddons()
   }
 
   if (scenario === 'recovery-needed') {
@@ -362,7 +349,7 @@ function buildPathHealth(store: DemoStore): LauncherPathHealth {
     addonsPath: store.settings.addonsPath,
     savedVariablesPath: store.settings.savedVariablesPath,
     gameExecutablePath: store.settings.gameExecutablePath,
-    detectedCandidates: clone(store.detectedCandidates),
+    detectedCandidates: structuredClone(store.detectedCandidates),
   }
 }
 
@@ -370,45 +357,48 @@ function buildLauncherStatus(store: DemoStore): {
   setupStatus: LauncherSetupStatus
   packStatus: PackStatus
   actionState: LauncherActionState
+  pack: CuratedPackSummary
+  pathHealth: LauncherPathHealth
 } {
   const pathHealth = buildPathHealth(store)
   const pack = buildPackSummary(store)
   if (!pathHealth.configured) {
-    return { setupStatus: 'setup_required', packStatus: 'ready_to_install', actionState: 'blocked' }
+    return { setupStatus: 'setup_required', packStatus: 'ready_to_install', actionState: 'blocked', pack, pathHealth }
   }
   if (store.interruptedOperation) {
     return {
       setupStatus: pack.installedCount === 0 ? 'ready_to_install' : 'ready',
       packStatus: 'recovery_needed',
       actionState: 'blocked',
+      pack,
+      pathHealth,
     }
   }
   if (pack.installedCount === 0) {
-    return { setupStatus: 'ready_to_install', packStatus: 'ready_to_install', actionState: 'idle' }
+    return { setupStatus: 'ready_to_install', packStatus: 'ready_to_install', actionState: 'idle', pack, pathHealth }
   }
   if (pack.members.some((m) => m.updateAvailable)) {
-    return { setupStatus: 'ready', packStatus: 'update_available', actionState: 'idle' }
+    return { setupStatus: 'ready', packStatus: 'update_available', actionState: 'idle', pack, pathHealth }
   }
-  return { setupStatus: 'ready', packStatus: 'up_to_date', actionState: 'idle' }
+  return { setupStatus: 'ready', packStatus: 'up_to_date', actionState: 'idle', pack, pathHealth }
 }
 
 function buildLauncherState(store: DemoStore): LauncherStateResponse {
-  const { setupStatus, packStatus, actionState } = buildLauncherStatus(store)
-  const pack = buildPackSummary(store)
+  const { setupStatus, packStatus, actionState, pack, pathHealth } = buildLauncherStatus(store)
   return {
-    settings: clone(store.settings),
+    settings: structuredClone(store.settings),
     setupStatus,
     packStatus,
     actionState,
     pack,
-    pathHealth: buildPathHealth(store),
+    pathHealth,
     updatesAvailable: pack.members.filter((m) => m.updateAvailable).length,
     lastSuccessfulSyncAt:
       store.snapshots.find((s) => s.snapshotType === 'recovery')?.createdAt ?? null,
     lastKnownGoodSnapshot: store.snapshots.find((s) => s.snapshotType === 'recovery') ?? null,
-    recoverySnapshots: clone(store.snapshots),
-    unmanagedCollisions: clone(store.unmanaged),
-    interruptedOperation: clone(store.interruptedOperation),
+    recoverySnapshots: structuredClone(store.snapshots),
+    unmanagedCollisions: structuredClone(store.unmanaged),
+    interruptedOperation: structuredClone(store.interruptedOperation),
     errorMessage: store.interruptedOperation
       ? 'A previous pack sync did not complete cleanly.'
       : null,
@@ -417,15 +407,15 @@ function buildLauncherState(store: DemoStore): LauncherStateResponse {
 
 function buildScanState(store: DemoStore): ScanStateResponse {
   return {
-    settings: clone(store.settings),
-    addons: clone(store.addons),
-    profiles: clone(store.profiles),
-    snapshots: clone(store.snapshots),
-    logs: clone(store.logs),
-    unmanaged: clone(store.unmanaged),
+    settings: structuredClone(store.settings),
+    addons: structuredClone(store.addons),
+    profiles: structuredClone(store.profiles),
+    snapshots: structuredClone(store.snapshots),
+    logs: structuredClone(store.logs),
+    unmanaged: structuredClone(store.unmanaged),
     issues: [],
     activeProfileId: store.activeProfileId,
-    interruptedOperation: clone(store.interruptedOperation),
+    interruptedOperation: structuredClone(store.interruptedOperation),
   }
 }
 
@@ -437,8 +427,10 @@ function buildUpdateState(store: DemoStore): UpdateCheckResponse {
     manifestUrl: 'https://dmedlin87.github.io/MedlinForge/catalog/stable.json',
     stale: false,
     errorMessage: null,
-    manager: clone(store.managerUpdate),
-    addons: store.addons.map((addon) => ({
+    manager: structuredClone(store.managerUpdate),
+    addons: store.addons.map((addon) => {
+      const slug = addon.displayName.replace(/\s+/g, '')
+      return {
       id: addon.id,
       name: addon.displayName,
       type: 'addon' as const,
@@ -448,14 +440,15 @@ function buildUpdateState(store: DemoStore): UpdateCheckResponse {
       available: addon.currentVersion !== addon.latestVersion,
       status: addon.currentVersion === addon.latestVersion ? 'up-to-date' : 'available',
       publishedAt: iso(6),
-      releaseUrl: `https://github.com/dmedlin87/${addon.displayName.replace(/\s+/g, '')}/releases/latest`,
-      packageUrl: `https://github.com/dmedlin87/${addon.displayName.replace(/\s+/g, '')}/releases/download/v${addon.latestVersion}/${addon.installFolder}.zip`,
+      releaseUrl: `https://github.com/dmedlin87/${slug}/releases/latest`,
+      packageUrl: `https://github.com/dmedlin87/${slug}/releases/download/v${addon.latestVersion}/${addon.installFolder}.zip`,
       sha256: 'a'.repeat(64),
       sizeBytes: 456789,
       installKind: 'addon-folder-zip',
       changelog: null,
       minManagerVersion: null,
-    })),
+    }
+    }),
   }
 }
 
@@ -500,8 +493,8 @@ export class DemoLauncherGateway implements LauncherGateway {
 
   async detectPaths(): Promise<DetectPathsResponse> {
     return {
-      candidates: clone(this.store.detectedCandidates),
-      settings: clone(this.store.settings),
+      candidates: structuredClone(this.store.detectedCandidates),
+      settings: structuredClone(this.store.settings),
     }
   }
 
@@ -646,7 +639,7 @@ export class DemoLauncherGateway implements LauncherGateway {
     this.store.settings = {
       ...this.store.settings,
       ...(Object.fromEntries(
-        Object.entries(request).filter(([, value]) => value !== undefined),
+        Object.entries(request).filter(([, value]) => value != null),
       ) as Partial<Settings>),
     }
     return buildScanState(this.store)
@@ -725,7 +718,7 @@ export class DemoLauncherGateway implements LauncherGateway {
   }
 
   async listSnapshots(): Promise<SnapshotSummary[]> {
-    return clone(this.store.snapshots)
+    return structuredClone(this.store.snapshots)
   }
 
   async checkUpdates(): Promise<UpdateCheckResponse> {

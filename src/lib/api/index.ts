@@ -9,10 +9,16 @@ export type { DemoScenario } from './demoLauncherGateway'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
-const demoGateway = new DemoLauncherGateway()
+// Lazy: only created when actually needed. In production Tauri builds
+// neither the ternary below nor __resetDemoApiState is ever evaluated with
+// isTauri = true, so the demo store is never allocated.
+let _demoGateway: DemoLauncherGateway | undefined
+function getDemoGateway(): DemoLauncherGateway {
+  return (_demoGateway ??= new DemoLauncherGateway())
+}
 
-export const api: LauncherGateway = isTauri ? new TauriLauncherGateway() : demoGateway
+export const api: LauncherGateway = isTauri ? new TauriLauncherGateway() : getDemoGateway()
 
 export function __resetDemoApiState(scenario?: Parameters<DemoLauncherGateway['resetScenario']>[0]): void {
-  demoGateway.resetScenario(scenario)
+  getDemoGateway().resetScenario(scenario)
 }
