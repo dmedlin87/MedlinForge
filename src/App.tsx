@@ -16,10 +16,15 @@ import clsx from 'clsx'
 import { api } from './lib/api'
 import { formatBytes, formatWhen } from './lib/format'
 import {
+  canAutoSetup,
+  canLaunchGame,
+  canOpenAddonsFolder,
   getPrimaryAction,
   isProtectedAddonsPermissionError,
   labelForPrimary,
   labelForStatus,
+  requiresCandidateSelection,
+  showSetupCard,
   toneForStatus,
 } from './features/launcher/domain/launcherLogic'
 import type {
@@ -143,57 +148,22 @@ function App() {
   }, [settingsDraft])
 
   useEffect(() => {
-    if (
-      launcher &&
-      launcher.setupStatus === 'setup_required' &&
-      !launcher.settings.onboardingCompleted &&
-      launcher.pathHealth.detectedCandidates.length === 1 &&
-      !autoSetupAttempted
-    ) {
+    if (launcher && canAutoSetup(launcher, autoSetupAttempted)) {
       setAutoSetupAttempted(true)
-      void (async () => {
-        if (setupInProgress.current) return
-        setupInProgress.current = true
-        try {
-          const next = await run(
-            'setup',
-            () =>
-              api.runInitialSetup({
-                ascensionRootPath: launcher.pathHealth.detectedCandidates[0].ascensionRootPath,
-                addonsPath: launcher.pathHealth.detectedCandidates[0].addonsPath,
-                savedVariablesPath: launcher.pathHealth.detectedCandidates[0].savedVariablesPath,
-                gameExecutablePath: null,
-              }),
-            'Launcher setup saved.',
-          )
-          if (next) {
-            setLauncher(next)
-            setAutoSetupFailed(false)
-          } else {
-            setAutoSetupFailed(true)
-          }
-        } finally {
-          setupInProgress.current = false
-        }
-      })()
+      void completeSetup(launcher.pathHealth.detectedCandidates[0])
     }
-  }, [launcher, autoSetupAttempted])
+  }, [launcher, autoSetupAttempted, completeSetup])
 
   async function run<T>(label: string, action: () => Promise<T>, success?: string) {
     try {
       setWorking(label)
       setError(null)
+      setNotice(null)
       const result = await action()
       if (success) setNotice(success)
       return result
     } catch (caught) {
-      const message = caught instanceof Error
-        ? caught.message
-        : typeof caught === 'string'
-          ? caught
-          : typeof caught === 'object' && caught !== null && 'message' in caught
-            ? String((caught as { message: unknown }).message)
-            : `${label} failed.`
+      const message = caught instanceof Error ? caught.message : `${label} failed.`
       setError(`${label.charAt(0).toUpperCase() + label.slice(1)} failed: ${message}`)
       return null
     } finally {
@@ -258,7 +228,7 @@ function App() {
                 <button className="button-secondary" disabled={working !== null} onClick={() => changeScreen('settings')}>
                   Review Paths
                 </button>
-                {launcher.pathHealth.addonsPath ? (
+                {canOpenAddonsFolder(launcher) ? (
                   <button className="button-secondary" disabled={working !== null} onClick={() => void run('open addons folder', () => api.openAddonsFolder())}>
                     <FolderOpen className="size-4" />
                     Open AddOns Folder
@@ -282,7 +252,7 @@ function App() {
                 <button className="button-primary" onClick={() => {
                   if (primary === 'setup') {
                     const candidate = launcher.pathHealth.detectedCandidates.find((entry) => entry.ascensionRootPath === selectedCandidate)
-                    if (launcher.pathHealth.detectedCandidates.length > 1 && !candidate) {
+                    if (requiresCandidateSelection(launcher, selectedCandidate)) {
                       setError('Select an install before continuing setup.')
                       return
                     }
@@ -296,13 +266,13 @@ function App() {
                   {working ? <Loader2 className="size-4 animate-spin" /> : null}
                   {labelForPrimary(primary, launcher.packStatus)}
                 </button>
-                {launcher.pathHealth.addonsPath ? (
+                {canOpenAddonsFolder(launcher) ? (
                   <button className="button-secondary" disabled={working !== null} onClick={() => void run('open addons folder', () => api.openAddonsFolder())}>
                     <FolderOpen className="size-4" />
                     Open AddOns Folder
                   </button>
                 ) : null}
-                {launcher.pathHealth.gameExecutablePath ? (
+                {canLaunchGame(launcher) ? (
                   <button className="button-secondary" disabled={working !== null} onClick={() => void run('launch game', () => api.launchGame())}>
                     <Play className="size-4" />
                     Launch Game
@@ -311,7 +281,7 @@ function App() {
               </div>
             </Card>
 
-            {launcher.setupStatus === 'setup_required' ? (
+            {showSetupCard(launcher) ? (
               <Card title="Setup" subtitle={launcher.pathHealth.detectedCandidates.length ? 'BronzeForge found install candidates.' : 'No install was detected automatically.'}>
                 {launcher.pathHealth.detectedCandidates.length ? (
                   <div className="grid gap-3">

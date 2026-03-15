@@ -16,68 +16,79 @@ import type {
   UpdateCheckResponse,
 } from '../../types'
 
+// Tauri rejects invoke() with a raw string from Rust. Normalise to Error so
+// callers can rely on instanceof Error checks throughout the app.
+async function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args)
+  } catch (caught) {
+    const message = typeof caught === 'string' ? caught : caught instanceof Error ? caught.message : String(caught)
+    throw new Error(message)
+  }
+}
+
 export class TauriLauncherGateway implements LauncherGateway {
   detectPaths(): Promise<DetectPathsResponse> {
-    return invoke('detect_paths')
+    return tauriInvoke('detect_paths')
   }
 
   getLauncherState(): Promise<LauncherStateResponse> {
-    return invoke('get_launcher_state')
+    return tauriInvoke('get_launcher_state')
   }
 
   runInitialSetup(request: RunInitialSetupRequest): Promise<LauncherStateResponse> {
-    return invoke('run_initial_setup', { request })
+    return tauriInvoke('run_initial_setup', { request })
   }
 
   syncCuratedPack(): Promise<LauncherStateResponse> {
-    return invoke('sync_curated_pack')
+    return tauriInvoke('sync_curated_pack')
   }
 
   restoreLastKnownGood(request: RestoreLastKnownGoodRequest = {}): Promise<OperationResponse> {
-    return invoke('restore_last_known_good', { request })
+    return tauriInvoke('restore_last_known_good', { request })
   }
 
   launchGame(): Promise<string> {
-    return invoke('launch_game')
+    return tauriInvoke('launch_game')
   }
 
   openAddonsFolder(): Promise<string> {
-    return invoke('open_addons_folder')
+    return tauriInvoke('open_addons_folder')
   }
 
   setMaintainerMode(request: SetMaintainerModeRequest): Promise<LauncherStateResponse> {
-    return invoke('set_maintainer_mode', { request })
+    return tauriInvoke('set_maintainer_mode', { request })
   }
 
   saveSettings(request: SaveSettingsRequest): Promise<ScanStateResponse> {
-    return invoke('save_settings', { request })
+    return tauriInvoke('save_settings', { request })
   }
 
   scanLiveState(): Promise<ScanStateResponse> {
-    return invoke('scan_live_state')
+    return tauriInvoke('scan_live_state')
   }
 
   registerSource(request: RegisterSourceRequest): Promise<ScanStateResponse> {
-    return invoke('register_source', { request })
+    return tauriInvoke('register_source', { request })
   }
 
   createProfile(request: CreateProfileRequest): Promise<ScanStateResponse> {
-    return invoke('create_profile', { request })
+    return tauriInvoke('create_profile', { request })
   }
 
   duplicateProfile(request: { profileId: string }): Promise<ScanStateResponse> {
-    return invoke('duplicate_profile', { request })
+    return tauriInvoke('duplicate_profile', { request })
   }
 
   switchProfile(request: { profileId: string }): Promise<ScanStateResponse> {
-    return invoke('switch_profile', { request })
+    return tauriInvoke('switch_profile', { request })
   }
 
   listSnapshots(): Promise<SnapshotSummary[]> {
-    return invoke('list_snapshots')
+    return tauriInvoke('list_snapshots')
   }
 
   checkUpdates(): Promise<UpdateCheckResponse> {
-    return invoke('check_updates')
+    return tauriInvoke('check_updates')
   }
 }

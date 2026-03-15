@@ -1,5 +1,32 @@
 import type { LauncherStateResponse } from '../../../types'
 
+export function canAutoSetup(launcher: LauncherStateResponse, autoSetupAttempted: boolean): boolean {
+  return (
+    launcher.setupStatus === 'setup_required' &&
+    !launcher.settings.onboardingCompleted &&
+    launcher.pathHealth.detectedCandidates.length === 1 &&
+    !autoSetupAttempted
+  )
+}
+
+export function canLaunchGame(launcher: LauncherStateResponse): boolean {
+  return launcher.pathHealth.gameExecutablePath !== null
+}
+
+export function canOpenAddonsFolder(launcher: LauncherStateResponse): boolean {
+  return launcher.pathHealth.addonsPath !== null
+}
+
+export function showSetupCard(launcher: LauncherStateResponse): boolean {
+  return launcher.setupStatus === 'setup_required'
+}
+
+export function requiresCandidateSelection(launcher: LauncherStateResponse, selectedPath: string | null): boolean {
+  const { detectedCandidates } = launcher.pathHealth
+  if (detectedCandidates.length <= 1) return false
+  return !detectedCandidates.some((c) => c.ascensionRootPath === selectedPath)
+}
+
 export function getPrimaryAction(launcher: LauncherStateResponse): 'setup' | 'recovery' | 'sync' {
   if (launcher.setupStatus === 'setup_required') return 'setup'
   if (launcher.packStatus === 'recovery_needed') return 'recovery'

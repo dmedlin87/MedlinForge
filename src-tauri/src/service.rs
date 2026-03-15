@@ -108,15 +108,12 @@ struct RemoteProductCacheRow {
     product_id: String,
     channel: UpdateChannel,
     payload_json: String,
-    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
 struct RemotePackCacheRow {
     pack_id: String,
-    channel: UpdateChannel,
     payload_json: String,
-    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -2810,7 +2807,7 @@ impl ManagerService {
         channel: UpdateChannel,
     ) -> ServiceResult<Vec<RemoteManifestProduct>> {
         let mut statement = self.connection.prepare(
-            "SELECT product_id, channel, payload_json, checked_at
+            "SELECT product_id, channel, payload_json
              FROM remote_products
              WHERE channel = ?1
              ORDER BY product_id COLLATE NOCASE",
@@ -2823,8 +2820,6 @@ impl ManagerService {
                     .parse::<UpdateChannel>()
                     .map_err(string_to_sql_error)?,
                 payload_json: row.get(2)?,
-                checked_at: parse_timestamp(&row.get::<_, String>(3)?)
-                    .map_err(string_to_sql_error)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2848,7 +2843,7 @@ impl ManagerService {
         channel: UpdateChannel,
     ) -> ServiceResult<Vec<RemoteManifestPack>> {
         let mut statement = self.connection.prepare(
-            "SELECT pack_id, channel, payload_json, checked_at
+            "SELECT pack_id, payload_json
              FROM remote_packs
              WHERE channel = ?1
              ORDER BY pack_id COLLATE NOCASE",
@@ -2856,13 +2851,7 @@ impl ManagerService {
         let rows = statement.query_map(params![channel.to_string()], |row| {
             Ok(RemotePackCacheRow {
                 pack_id: row.get(0)?,
-                channel: row
-                    .get::<_, String>(1)?
-                    .parse::<UpdateChannel>()
-                    .map_err(string_to_sql_error)?,
-                payload_json: row.get(2)?,
-                checked_at: parse_timestamp(&row.get::<_, String>(3)?)
-                    .map_err(string_to_sql_error)?,
+                payload_json: row.get(1)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -4031,5 +4020,65 @@ mod tests {
         let path = Path::new(r"C:\Program Files\Ascension Launcher\resources\client\Interface\AddOns");
 
         assert!(is_windows_protected_install_path(path));
+    }
+
+    // --- Pure helper unit tests ---
+
+    #[test]
+    fn sanitize_version_replaces_non_alphanumeric_with_dashes() {
+        use super::sanitize_version;
+        assert_eq!(sanitize_version("1.2.3"), "-1-2-3");
+        assert_eq!(sanitize_version("1.0.0-beta"), "-1-0-0-beta");
+        assert_eq!(sanitize_version("abc123"), "-abc123");
+        assert_eq!(sanitize_version(""), "-");
+    }
+
+    #[test]
+    fn pack_profile_id_prefixes_with_pack_namespace() {
+        use super::pack_profile_id;
+        assert_eq!(pack_profile_id("bronzebeard"), "pack::bronzebeard");
+        assert_eq!(pack_profile_id(""), "pack::");
+    }
+
+    #[test]
+    fn normalize_display_path_trims_whitespace_and_quotes() {
+        use super::normalize_display_path;
+        assert_eq!(normalize_display_path("  C:/Game  ".to_string()), "C:/Game");
+        assert_eq!(
+            normalize_display_path(r#""C:\Program Files\Game""#.to_string()),
+            r"C:\Program Files\Game"
+        );
+        assert_eq!(
+            normalize_display_path("C:/Game".to_string()),
+            "C:/Game"
+        );
+    }
+
+    #[test]
+    fn apply_selection_override_updates_existing_selection() {
+        use super::apply_selection_override;
+        use crate::models::ProfileSelection;
+        let selections = vec![ProfileSelection {
+            addon_id: "addon-a".to_string(),
+            enabled: false,
+            channel_override: None,
+        }];
+        let result = apply_selection_override(selections, "addon-a", true, None);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].enabled);
+    }
+
+    #[test]
+    fn apply_selection_override_appends_when_addon_not_present() {
+        use super::apply_selection_override;
+        use crate::models::ProfileSelection;
+        let selections = vec![ProfileSelection {
+            addon_id: "addon-a".to_string(),
+            enabled: true,
+            channel_override: None,
+        }];
+        let result = apply_selection_override(selections, "addon-b", false, None);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|s| s.addon_id == "addon-b" && !s.enabled));
     }
 }

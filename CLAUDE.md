@@ -14,6 +14,7 @@ BronzeForge Manager is a Windows-first Tauri v2 desktop app that manages addon s
 ## Commands
 
 ```
+npm run tag-addon-release      # Tag a new addon release
 npm run dev                    # Vite dev server on http://localhost:1420
 npm run tauri:dev              # Desktop shell against dev server
 npm run build                  # TypeScript check + production frontend build
@@ -26,6 +27,10 @@ npm run test:update-manifests  # Validate manifest builder
 ```
 
 ## Architecture — current state (pre-refactor)
+
+> **Refactor in progress**: Phase 1 (pure helpers) and Phase 2 (gateway split) are partially
+> complete. `src/features/launcher/domain/launcherLogic.ts` and all four gateway files exist.
+> `src/lib/api.ts` still exists — treat it as legacy until fully replaced.
 
 Three primary complexity sinks that the refactor brief targets:
 
