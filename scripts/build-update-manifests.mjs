@@ -273,19 +273,29 @@ async function fetchJson(url, token, fetchImpl) {
 }
 
 async function fetchAssetDigest(url, fetchImpl) {
-  const response = await fetchImpl(url, {
-    redirect: 'follow',
-    headers: {
-      'User-Agent': 'BronzeForge-Manifest-Builder',
-    },
-  })
-  if (!response.ok) {
-    fail(`Asset download failed for ${url}: ${response.status} ${response.statusText}`)
-  }
-  const bytes = Buffer.from(await response.arrayBuffer())
-  return {
-    sha256: createHash('sha256').update(bytes).digest('hex'),
-    sizeBytes: bytes.byteLength,
+  const maxAttempts = 4
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetchImpl(url, {
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'BronzeForge-Manifest-Builder',
+      },
+    })
+    if (response.ok) {
+      const bytes = Buffer.from(await response.arrayBuffer())
+      return {
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        sizeBytes: bytes.byteLength,
+      }
+    }
+
+    const retryable = response.status === 429 || response.status >= 500
+    if (!retryable || attempt === maxAttempts) {
+      fail(`Asset download failed for ${url}: ${response.status} ${response.statusText}`)
+    }
+
+    const delayMs = attempt * 2000
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
   }
 }
 
