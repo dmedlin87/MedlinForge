@@ -14,7 +14,7 @@ function makeLauncher(overrides: Partial<LauncherStateResponse> = {}): LauncherS
     packStatus: 'up_to_date',
     actionState: 'idle',
     pack: null,
-    pathHealth: { detectedCandidates: [], addonsPath: null, savedVariablesPath: null, ascensionRootPath: null, gameExecutablePath: null },
+    pathHealth: { configured: true, detectedCandidates: [], addonsPath: null, savedVariablesPath: null, ascensionRootPath: null, gameExecutablePath: null },
     updatesAvailable: 0,
     lastSuccessfulSyncAt: null,
     lastKnownGoodSnapshot: null,
