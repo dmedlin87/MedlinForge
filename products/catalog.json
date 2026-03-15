@@ -11,14 +11,6 @@
       "recoveryDescription": "Revert the pack to the most recent working state if a test build breaks the UI.",
       "members": [
         {
-          "productId": "bronzeforge-ui",
-          "required": true
-        },
-        {
-          "productId": "bronze-bars",
-          "required": true
-        },
-        {
           "productId": "ding-timer",
           "required": true
         },
@@ -39,26 +31,6 @@
       "assetName": "bronzeforge-manager-windows-x64-installer.exe",
       "installKind": "nsis-installer",
       "platform": "windows-x64"
-    },
-    {
-      "id": "bronzeforge-ui",
-      "name": "BronzeForge UI",
-      "type": "addon",
-      "repository": "dmedlin87/BronzeForgeUI",
-      "channels": ["stable", "beta"],
-      "assetName": "BronzeForgeUI.zip",
-      "installKind": "addon-folder-zip",
-      "platform": "windows-any"
-    },
-    {
-      "id": "bronze-bars",
-      "name": "Bronze Bars",
-      "type": "addon",
-      "repository": "dmedlin87/BronzeBars",
-      "channels": ["stable"],
-      "assetName": "BronzeBars.zip",
-      "installKind": "addon-folder-zip",
-      "platform": "windows-any"
     },
     {
       "id": "ding-timer",
