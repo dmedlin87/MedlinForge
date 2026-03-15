@@ -508,7 +508,7 @@ export class DemoLauncherGateway implements LauncherGateway {
         (c) =>
           c.ascensionRootPath === request.ascensionRootPath ||
           c.addonsPath === request.addonsPath,
-      ) ?? this.store.detectedCandidates[0]
+      ) ?? (this.store.detectedCandidates.length === 1 ? this.store.detectedCandidates[0] : undefined)
 
     if (
       !request.ascensionRootPath &&
