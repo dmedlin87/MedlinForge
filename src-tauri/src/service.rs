@@ -566,8 +566,7 @@ impl ManagerService {
                         .unwrap_or_else(|| "<not configured>".to_string());
                     ServiceError::Message(format!(
                         "Cannot write to AddOns folder at '{}': permission denied. \
-                         Close the game/launcher and run BronzeForge as administrator, \
-                         or move the install outside Program Files.",
+                         Close the game and launcher, then try again.",
                         addons_path
                     ))
                 }
@@ -700,8 +699,8 @@ impl ManagerService {
             if let Err(err) = fs::create_dir_all(addons_path) {
                 if err.kind() == std::io::ErrorKind::PermissionDenied {
                     return Err(ServiceError::Message(format!(
-                        "Cannot write to AddOns folder at '{}': permission denied. \
-                         Try choosing an install outside of Program Files, or run as administrator.",
+                        "Cannot create AddOns folder at '{}': permission denied. \
+                         Close the game and launcher, then try again.",
                         addons_path
                     )));
                 }
@@ -2229,9 +2228,9 @@ impl ManagerService {
                 if replaced_target.exists() {
                     fs::remove_dir_all(&replaced_target)?;
                 }
-                fs::rename(&plan.target_path, &replaced_target)?;
+                move_dir(&plan.target_path, &replaced_target)?;
             }
-            fs::rename(&staged_target, &plan.target_path)?;
+            move_dir(&staged_target, &plan.target_path)?;
         }
         for removal in &preview.removals {
             if removal.target_path.exists() {
@@ -2239,7 +2238,7 @@ impl ManagerService {
                 if removed_target.exists() {
                     fs::remove_dir_all(&removed_target)?;
                 }
-                fs::rename(&removal.target_path, &removed_target)?;
+                move_dir(&removal.target_path, &removed_target)?;
             }
         }
         if let Some(saved_root) = settings.saved_variables_path {
@@ -3556,6 +3555,24 @@ fn copy_dir_all(source: &Path, destination: &Path) -> ServiceResult<()> {
         }
     }
     Ok(())
+}
+
+/// Move a directory, falling back to copy+delete when rename fails
+/// (e.g. across volumes or NTFS security boundaries like Program Files).
+fn move_dir(source: &Path, destination: &Path) -> ServiceResult<()> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.raw_os_error() == Some(17) // Windows ERROR_NOT_SAME_DEVICE / Linux EXDEV
+                || e.raw_os_error() == Some(18) // macOS EXDEV
+                || e.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            copy_dir_all(source, destination)?;
+            fs::remove_dir_all(source)?;
+            Ok(())
+        }
+        Err(e) => Err(ServiceError::Io(e)),
+    }
 }
 
 fn dir_size(path: &Path) -> ServiceResult<u64> {

@@ -30,6 +30,14 @@
     "targets": ["nsis"],
     "publisher": "MedlinForge",
     "shortDescription": "Windows desktop addon manager for Project Ascension Bronzebeard addon suites.",
-    "category": "Utility"
+    "category": "Utility",
+    "windows": {
+      "nsis": {
+        "installerIcon": null,
+        "headerImage": null,
+        "sidebarImage": null,
+        "installMode": "perMachine"
+      }
+    }
   }
 }
