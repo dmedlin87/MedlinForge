@@ -272,6 +272,18 @@ export interface SyncProfileRequest {
   isolateAddonId?: string | null
 }
 
+export interface InstallAddonRequest {
+  addonId: string
+  profileId?: string | null
+  previewOnly?: boolean | null
+}
+
+export interface ApplyRemoteAddonUpdateRequest {
+  addonId: string
+  profileId?: string | null
+  previewOnly?: boolean | null
+}
+
 export interface RemoteProductUpdate {
   id: string
   name: string

@@ -95,6 +95,30 @@ test('clicking Sync Pack Updates transitions UI to Up To Date', async () => {
   expect(await screen.findByRole('button', { name: /Resync Pack/i })).toBeInTheDocument()
 })
 
+test('installing a single addon from pack breakdown updates only that addon card', async () => {
+  __resetDemoApiState('installable-pack')
+  const user = userEvent.setup()
+  render(<App />)
+
+  await user.click(await screen.findByRole('button', { name: /Install BronzeForge UI/i }))
+
+  expect(await screen.findByText(/BronzeForge UI installed\./i)).toBeInTheDocument()
+  expect(await screen.findByText(/Installed 1\.5\.0/i)).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: /Reinstall BronzeForge UI/i })).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: /Install Bronze Bars/i })).toBeInTheDocument()
+})
+
+test('adopting an existing addon from AddOns marks that pack member installed', async () => {
+  __resetDemoApiState('installable-pack')
+  const user = userEvent.setup()
+  render(<App />)
+
+  await user.click(await screen.findByRole('button', { name: /Use Installed BronzeForge UI/i }))
+
+  expect(await screen.findByText(/BronzeForge UI adopted from the local AddOns folder\./i)).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: /Install Bronze Bars/i })).toBeInTheDocument()
+})
+
 test('clicking Open Recovery navigates to the recovery screen', async () => {
   __resetDemoApiState('recovery-needed')
   const user = userEvent.setup()

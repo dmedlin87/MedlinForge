@@ -1,7 +1,9 @@
 import type { LauncherGateway } from '../../lib/api/launcherGateway'
 import type {
+  ApplyRemoteAddonUpdateRequest,
   CreateProfileRequest,
   DetectPathsResponse,
+  InstallAddonRequest,
   LauncherStateResponse,
   OperationResponse,
   RegisterSourceRequest,
@@ -122,6 +124,22 @@ export class FakeLauncherGateway implements LauncherGateway {
 
   async syncCuratedPack(): Promise<LauncherStateResponse> {
     return this.launcherState
+  }
+
+  async applyRemoteAddonUpdate(_request: ApplyRemoteAddonUpdateRequest): Promise<OperationResponse> {
+    return this.operationResult
+  }
+
+  async installAddon(_request: InstallAddonRequest): Promise<OperationResponse> {
+    return this.operationResult
+  }
+
+  async updateAddon(_request: InstallAddonRequest): Promise<OperationResponse> {
+    return this.operationResult
+  }
+
+  async uninstallAddon(_request: InstallAddonRequest): Promise<OperationResponse> {
+    return this.operationResult
   }
 
   async restoreLastKnownGood(_request?: RestoreLastKnownGoodRequest): Promise<OperationResponse> {

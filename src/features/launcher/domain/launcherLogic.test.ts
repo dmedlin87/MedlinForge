@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import type { LauncherStateResponse } from '../../../types'
 import type { LauncherPackMember, SnapshotSummary } from '../../../types'
 import {
+  canAdoptPackMember,
   canAutoSetup,
   canLaunchGame,
   canOpenAddonsFolder,
   descriptionForPackMember,
+  findAdoptablePackMemberFolder,
   getPrimaryAction,
   isProtectedAddonsPermissionError,
   labelForPackMember,
@@ -317,11 +319,65 @@ describe('labelForPackMember', () => {
 
 describe('descriptionForPackMember', () => {
   it('returns version string when installed', () => {
-    expect(descriptionForPackMember(makeMember({ currentVersion: '2.3.1' }))).toBe('Installed 2.3.1')
+    expect(descriptionForPackMember(makeMember({ installed: true, currentVersion: '2.3.1' }))).toBe('Installed 2.3.1')
   })
 
   it('returns not installed message when currentVersion is null', () => {
     expect(descriptionForPackMember(makeMember({ currentVersion: null }))).toBe('Not installed yet')
+  })
+
+  it('returns unknown version message when installed without version metadata', () => {
+    expect(descriptionForPackMember(makeMember({ installed: true, currentVersion: null }))).toBe('Installed (version unknown)')
+  })
+})
+
+describe('findAdoptablePackMemberFolder', () => {
+  it('returns unmanaged folder with matching install folder', () => {
+    const launcher = makeLauncher({
+      unmanagedCollisions: [
+        { name: 'DingTimer', managed: false, addonId: null, path: 'C:/Game/AddOns/DingTimer' },
+      ],
+    })
+
+    expect(findAdoptablePackMemberFolder(launcher, makeMember({ installFolder: 'DingTimer' }))).toEqual(
+      { name: 'DingTimer', managed: false, addonId: null, path: 'C:/Game/AddOns/DingTimer' },
+    )
+  })
+
+  it('matches folder names case-insensitively', () => {
+    const launcher = makeLauncher({
+      unmanagedCollisions: [
+        { name: 'DingTimer', managed: false, addonId: null, path: 'C:/Game/AddOns/DingTimer' },
+      ],
+    })
+
+    expect(findAdoptablePackMemberFolder(launcher, makeMember({ installFolder: 'dingtimer' }))).not.toBeNull()
+  })
+
+  it('returns null when addon is already installed', () => {
+    const launcher = makeLauncher({
+      unmanagedCollisions: [
+        { name: 'DingTimer', managed: false, addonId: null, path: 'C:/Game/AddOns/DingTimer' },
+      ],
+    })
+
+    expect(findAdoptablePackMemberFolder(launcher, makeMember({ installFolder: 'DingTimer', installed: true }))).toBeNull()
+  })
+})
+
+describe('canAdoptPackMember', () => {
+  it('returns true when unmanaged live folder exists for the member', () => {
+    const launcher = makeLauncher({
+      unmanagedCollisions: [
+        { name: 'DingTimer', managed: false, addonId: null, path: 'C:/Game/AddOns/DingTimer' },
+      ],
+    })
+
+    expect(canAdoptPackMember(launcher, makeMember({ installFolder: 'DingTimer' }))).toBe(true)
+  })
+
+  it('returns false when no matching unmanaged folder exists', () => {
+    expect(canAdoptPackMember(makeLauncher(), makeMember({ installFolder: 'DingTimer' }))).toBe(false)
   })
 })
 

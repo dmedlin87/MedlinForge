@@ -1,6 +1,8 @@
 import type {
+  ApplyRemoteAddonUpdateRequest,
   CreateProfileRequest,
   DetectPathsResponse,
+  InstallAddonRequest,
   LauncherStateResponse,
   OperationResponse,
   RegisterSourceRequest,
@@ -18,6 +20,10 @@ export interface LauncherGateway {
   getLauncherState(): Promise<LauncherStateResponse>
   runInitialSetup(request: RunInitialSetupRequest): Promise<LauncherStateResponse>
   syncCuratedPack(): Promise<LauncherStateResponse>
+  applyRemoteAddonUpdate(request: ApplyRemoteAddonUpdateRequest): Promise<OperationResponse>
+  installAddon(request: InstallAddonRequest): Promise<OperationResponse>
+  updateAddon(request: InstallAddonRequest): Promise<OperationResponse>
+  uninstallAddon(request: InstallAddonRequest): Promise<OperationResponse>
   restoreLastKnownGood(request?: RestoreLastKnownGoodRequest): Promise<OperationResponse>
   launchGame(): Promise<string>
   openAddonsFolder(): Promise<string>

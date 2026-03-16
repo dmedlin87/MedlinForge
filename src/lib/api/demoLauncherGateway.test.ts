@@ -353,6 +353,28 @@ describe('registerSource', () => {
     const registered = scan.addons.at(-1)!
     expect(registered.sources[0].sourceKind).toBe('zip-file')
   })
+
+  it('adopts an existing unmanaged addon folder instead of creating a duplicate addon', async () => {
+    const gw = new DemoLauncherGateway('installable-pack')
+
+    await gw.registerSource({
+      sourceKind: 'local-folder',
+      path: 'C:\\Program Files\\Ascension Launcher\\resources\\client\\Interface\\AddOns\\BronzeForgeUI',
+      channel: 'stable',
+      core: true,
+    })
+
+    const launcher = await gw.getLauncherState()
+    const member = launcher.pack?.members.find((entry) => entry.installFolder === 'BronzeForgeUI')
+
+    expect(member?.installed).toBe(true)
+    expect(member?.currentVersion).toBe('1.5.0')
+    expect(member?.updateAvailable).toBe(false)
+    expect(launcher.unmanagedCollisions.some((entry) => entry.name === 'BronzeForgeUI')).toBe(false)
+
+    const scan = await gw.scanLiveState()
+    expect(scan.addons.filter((addon) => addon.installFolder === 'BronzeForgeUI')).toHaveLength(1)
+  })
 })
 
 // ---------------------------------------------------------------------------

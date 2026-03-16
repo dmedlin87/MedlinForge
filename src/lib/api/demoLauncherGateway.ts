@@ -1,10 +1,12 @@
 import type { LauncherGateway } from './launcherGateway'
 import type {
   AddonRecord,
+  ApplyRemoteAddonUpdateRequest,
   CreateProfileRequest,
   CuratedPackSummary,
   DetectPathCandidate,
   DetectPathsResponse,
+  InstallAddonRequest,
   LauncherActionState,
   LauncherPackMember,
   LauncherPathHealth,
@@ -228,6 +230,14 @@ function createDemoStore(scenario: DemoScenario): DemoStore {
 
   if (scenario === 'installable-pack') {
     addons = makeUninstalledAddons()
+    unmanaged = [
+      {
+        name: 'BronzeForgeUI',
+        managed: false,
+        addonId: null,
+        path: `${settings.addonsPath}\BronzeForgeUI`,
+      },
+    ]
   }
 
   if (scenario === 'single-setup') {
@@ -599,6 +609,22 @@ export class DemoLauncherGateway implements LauncherGateway {
     return buildLauncherState(this.store)
   }
 
+  async applyRemoteAddonUpdate(request: ApplyRemoteAddonUpdateRequest): Promise<OperationResponse> {
+    return this.applyAddonMutation(request.addonId, 'install')
+  }
+
+  async installAddon(request: InstallAddonRequest): Promise<OperationResponse> {
+    return this.applyAddonMutation(request.addonId, 'install')
+  }
+
+  async updateAddon(request: InstallAddonRequest): Promise<OperationResponse> {
+    return this.applyAddonMutation(request.addonId, 'update')
+  }
+
+  async uninstallAddon(request: InstallAddonRequest): Promise<OperationResponse> {
+    return this.applyAddonMutation(request.addonId, 'remove')
+  }
+
   async restoreLastKnownGood(
     request: RestoreLastKnownGoodRequest = {},
   ): Promise<OperationResponse> {
@@ -650,12 +676,51 @@ export class DemoLauncherGateway implements LauncherGateway {
   }
 
   async registerSource(request: RegisterSourceRequest): Promise<ScanStateResponse> {
+    const folderName = request.path.split(/[\\/]/).pop() ?? ''
+    const existingAddon = this.store.addons.find(
+      (addon) => addon.installFolder.toLowerCase() === folderName.toLowerCase(),
+    )
+
+    if (existingAddon) {
+      this.store.addons = this.store.addons.map((addon) =>
+        addon.id !== existingAddon.id
+          ? addon
+          : {
+              ...addon,
+              currentVersion: addon.latestVersion,
+              currentChannel: request.channel ?? 'stable',
+              enabledInActiveProfile: true,
+              health: 'Ready',
+              latestRevisions: [
+                {
+                  id: `rev-${addon.id}-${addon.latestVersion}`,
+                  channel: request.channel ?? 'stable',
+                  version: addon.latestVersion,
+                  createdAt: iso(0),
+                },
+              ],
+              sources: [
+                {
+                  id: crypto.randomUUID(),
+                  sourceKind: request.sourceKind,
+                  location: request.path,
+                  channelHint: request.channel ?? 'stable',
+                  updatedAt: iso(0),
+                },
+              ],
+            },
+      )
+      this.store.unmanaged = this.store.unmanaged.filter(
+        (folder) =>
+          folder.path.toLowerCase() !== request.path.toLowerCase() &&
+          folder.name.toLowerCase() !== folderName.toLowerCase(),
+      )
+      this.store.profiles = makeProfiles(this.store.addons)
+      return buildScanState(this.store)
+    }
+
     const id =
-      request.path
-        .split(/[\\/]/)
-        .pop()
-        ?.replace(/\W+/g, '-')
-        .toLowerCase() ?? `addon-${this.store.addons.length + 1}`
+      folderName.replace(/\W+/g, '-').toLowerCase() || `addon-${this.store.addons.length + 1}`
     const displayName = id
       .replace(/-/g, ' ')
       .replace(/\b\w/g, (v) => v.toUpperCase())
@@ -723,5 +788,99 @@ export class DemoLauncherGateway implements LauncherGateway {
 
   async checkUpdates(): Promise<UpdateCheckResponse> {
     return buildUpdateState(this.store)
+  }
+
+  private applyAddonMutation(addonId: string, action: 'install' | 'update' | 'remove'): OperationResponse {
+    const addon = this.store.addons.find((entry) => entry.id === addonId)
+    if (!addon) {
+      throw new Error(`Addon '${addonId}' was not found.`)
+    }
+
+    this.store.addons = this.store.addons.map((entry) => {
+      if (entry.id !== addonId) return entry
+
+      if (action === 'remove') {
+        return {
+          ...entry,
+          currentVersion: null,
+          currentChannel: null,
+          enabledInActiveProfile: false,
+          health: 'Not installed',
+          latestRevisions: [],
+        }
+      }
+
+      return {
+        ...entry,
+        currentVersion: entry.latestVersion,
+        currentChannel: 'stable',
+        enabledInActiveProfile: true,
+        health: 'Ready',
+        latestRevisions: [
+          {
+            id: `rev-${entry.id}-${entry.latestVersion}`,
+            channel: 'stable',
+            version: entry.latestVersion,
+            createdAt: iso(0),
+          },
+        ],
+        sources: entry.sources.length
+          ? entry.sources
+          : [
+              {
+                id: `source-${entry.id}`,
+                sourceKind: 'manifest',
+                location: `C:\packs\${entry.installFolder}\bronzeforge.addon.json`,
+                channelHint: 'stable',
+                updatedAt: iso(0),
+              },
+            ],
+      }
+    })
+
+    this.store.logs = [
+      {
+        id: crypto.randomUUID(),
+        operation: action === 'remove' ? 'uninstallAddon' : action === 'update' ? 'updateAddon' : 'installAddon',
+        status: 'success',
+        message:
+          action === 'remove'
+            ? `${addon.displayName} removed.`
+            : action === 'update'
+              ? `${addon.displayName} updated to ${addon.latestVersion}.`
+              : `${addon.displayName} installed.` ,
+        createdAt: iso(0),
+      },
+      ...this.store.logs,
+    ]
+
+    return {
+      ok: true,
+      applied: true,
+      operationId: crypto.randomUUID(),
+      snapshotId: null,
+      message:
+        action === 'remove'
+          ? `${addon.displayName} removed.`
+          : action === 'update'
+            ? `${addon.displayName} updated.`
+            : `${addon.displayName} installed.`,
+      preview: {
+        profileId: this.store.activeProfileId ?? 'profile-pack',
+        items: [
+          {
+            addonId: addon.id,
+            displayName: addon.displayName,
+            targetFolder: addon.installFolder,
+            changeType: action === 'remove' ? 'remove' : addon.currentVersion ? 'update' : 'install',
+            sourceVersion: action === 'remove' ? addon.currentVersion : addon.latestVersion,
+            channel: action === 'remove' ? addon.currentChannel : 'stable',
+          },
+        ],
+        savedVariables: [],
+        blockers: [],
+        warnings: [],
+      },
+    }
   }
 }

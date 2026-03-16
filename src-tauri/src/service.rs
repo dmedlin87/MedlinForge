@@ -9,6 +9,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
@@ -508,6 +509,7 @@ impl ManagerService {
                     member.product_id
                 ))
             })?;
+            let resolved_addon_id = self.resolve_catalog_addon_id(&member.product_id, &product.name)?;
             if !UpdateProvider::manager_version_satisfies(product.min_manager_version.as_deref()) {
                 return Err(ServiceError::Message(format!(
                     "{} requires BronzeForge Manager {} or newer",
@@ -516,7 +518,7 @@ impl ManagerService {
                 )));
             }
             let current_version = self
-                .latest_revision_for_channel(&member.product_id, channel)?
+                .latest_revision_for_channel(&resolved_addon_id, channel)?
                 .map(|revision| revision.version);
             let needs_download = current_version.is_none()
                 || UpdateProvider::is_remote_newer(
@@ -535,7 +537,7 @@ impl ManagerService {
             self.update_provider
                 .download_verified_asset(&settings, product, &download_path)?;
             let core = self
-                .load_addon(&member.product_id)
+                .load_addon(&resolved_addon_id)
                 .map(|addon| addon.is_core)
                 .unwrap_or(member.required);
             self.import_zip(ImportZipRequest {
@@ -692,7 +694,7 @@ impl ManagerService {
                 })
             });
         if let Some(addons_path) = addons.as_ref() {
-            ensure_addons_path_writable(addons_path)?;
+            ensure_addons_path_exists(addons_path)?;
         }
         // SavedVariables folder is created by the game on first run;
         // best-effort creation here — do not block setup on failure.
@@ -1092,7 +1094,7 @@ impl ManagerService {
             .load_settings()?
             .addons_path
             .ok_or_else(|| ServiceError::Message("AddOns path is required".to_string()))?;
-        ensure_addons_path_writable(&addons_path)?;
+        ensure_addons_path_exists(&addons_path)?;
 
         let snapshot_id = self.create_snapshot_for_preview(
             SnapshotType::Preflight,
@@ -1358,7 +1360,25 @@ impl ManagerService {
                 product.min_manager_version.unwrap_or_default()
             )));
         }
-        let addon = self.load_addon(&product.id)?;
+        let initial_addon_id = self.resolve_catalog_addon_id(&product.id, &product.name)?;
+        let addon = match self.load_addon(&initial_addon_id) {
+            Ok(addon) => addon,
+            Err(_) => {
+                self.upsert_addon(
+                    &product.id,
+                    &product.name,
+                    &product.name.replace(' ', ""),
+                    update_channel_to_channel(settings.update_channel),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                )?;
+                let resolved_addon_id = self.resolve_catalog_addon_id(&product.id, &product.name)?;
+                self.load_addon(&resolved_addon_id)?
+            }
+        };
         let download_path = self
             .directories
             .staging
@@ -1384,8 +1404,9 @@ impl ManagerService {
                 product.name, product.latest_version
             ),
         )?;
+        let resolved_addon_id = self.resolve_catalog_addon_id(&product.id, &product.name)?;
         self.update_addon(InstallAddonRequest {
-            addon_id: request.addon_id,
+            addon_id: resolved_addon_id,
             profile_id: request.profile_id,
             preview_only: request.preview_only,
         })
@@ -1809,7 +1830,7 @@ impl ManagerService {
     fn import_manifest_source(&mut self, manifest_path: &Path, core: bool) -> ServiceResult<()> {
         let manifest = read_manifest_file(manifest_path)?;
         let source_id = Uuid::new_v4().to_string();
-        let addon_id = manifest.addon_id.clone().unwrap_or_else(|| {
+        let requested_addon_id = manifest.addon_id.clone().unwrap_or_else(|| {
             manifest
                 .install_folder
                 .clone()
@@ -1819,14 +1840,14 @@ impl ManagerService {
         let display_name = manifest
             .display_name
             .clone()
-            .unwrap_or_else(|| addon_id.clone());
+            .unwrap_or_else(|| requested_addon_id.clone());
         let install_folder = manifest
             .install_folder
             .clone()
             .unwrap_or_else(|| display_name.replace(' ', ""));
         let default_channel = manifest.default_channel.unwrap_or(Channel::Stable);
-        self.upsert_addon(
-            &addon_id,
+        let addon_id = self.upsert_addon(
+            &requested_addon_id,
             &display_name,
             &install_folder,
             default_channel,
@@ -1880,7 +1901,7 @@ impl ManagerService {
         source_id_override: Option<String>,
     ) -> ServiceResult<(String, String)> {
         let metadata = load_local_metadata(folder_path, channel)?;
-        self.upsert_addon(
+        let addon_id = self.upsert_addon(
             &metadata.addon_id,
             &metadata.display_name,
             &metadata.install_folder,
@@ -1895,7 +1916,7 @@ impl ManagerService {
         self.connection.execute(
             "INSERT OR REPLACE INTO sources (id, addon_id, source_kind, location, channel_hint, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, COALESCE((SELECT created_at FROM sources WHERE id = ?1), ?6), ?6)",
-            params![source_id, metadata.addon_id, source_kind.to_string(), source_location, channel.to_string(), now_string()],
+            params![source_id, addon_id, source_kind.to_string(), source_location, channel.to_string(), now_string()],
         )?;
         let revision_id = Uuid::new_v4().to_string();
         let cache_root = self.directories.cache.join("revisions").join(&revision_id);
@@ -1907,7 +1928,7 @@ impl ManagerService {
             self.connection.execute(
                 "INSERT INTO revisions (id, addon_id, source_id, channel, version, cache_path, checksum, metadata_json, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![revision_id, metadata.addon_id, source_id, channel.to_string(), metadata.version, source_root.to_string_lossy().to_string(), checksum, json!({ "tocFile": metadata.toc_file }).to_string(), now_string()],
+                params![revision_id, addon_id, source_id, channel.to_string(), metadata.version, source_root.to_string_lossy().to_string(), checksum, json!({ "tocFile": metadata.toc_file }).to_string(), now_string()],
             )?;
         } else {
             copy_dir_all(&source_root, &cache_target)?;
@@ -1915,10 +1936,10 @@ impl ManagerService {
             self.connection.execute(
                 "INSERT INTO revisions (id, addon_id, source_id, channel, version, cache_path, checksum, metadata_json, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![revision_id, metadata.addon_id, source_id, channel.to_string(), metadata.version, cache_target.to_string_lossy().to_string(), checksum, json!({ "tocFile": metadata.toc_file }).to_string(), now_string()],
+                params![revision_id, addon_id, source_id, channel.to_string(), metadata.version, cache_target.to_string_lossy().to_string(), checksum, json!({ "tocFile": metadata.toc_file }).to_string(), now_string()],
             )?;
         }
-        self.ensure_addon_in_profiles(&metadata.addon_id)?;
+        self.ensure_addon_in_profiles(&addon_id)?;
         self.insert_log(
             "registerSource",
             "success",
@@ -1928,7 +1949,7 @@ impl ManagerService {
                 channel.as_str()
             ),
         )?;
-        Ok((source_id, metadata.addon_id))
+        Ok((source_id, addon_id))
     }
 
     fn touch_latest_revision_version(
@@ -2211,9 +2232,27 @@ impl ManagerService {
 
     fn apply_preview(&mut self, preview: &ProfilePreview) -> ServiceResult<()> {
         let settings = self.load_settings()?;
-        let _addons_path = settings
+        let addons_path = settings
             .addons_path
             .ok_or_else(|| ServiceError::Message("AddOns path is required".to_string()))?;
+        let saved_variables_path = settings.saved_variables_path.clone();
+        match self.apply_preview_local(preview, saved_variables_path.as_deref()) {
+            Ok(()) => Ok(()),
+            Err(ServiceError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && is_windows_protected_install_path(Path::new(&addons_path)) =>
+            {
+                self.apply_preview_elevated(preview, saved_variables_path.as_deref())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn apply_preview_local(
+        &mut self,
+        preview: &ProfilePreview,
+        saved_variables_path: Option<&str>,
+    ) -> ServiceResult<()> {
         let staging_root = self
             .directories
             .staging
@@ -2247,16 +2286,71 @@ impl ManagerService {
                 move_dir(&removal.target_path, &removed_target)?;
             }
         }
-        if let Some(saved_root) = settings.saved_variables_path {
-            fs::create_dir_all(&saved_root)?;
+        if let Some(saved_root) = saved_variables_path {
+            fs::create_dir_all(saved_root)?;
             for variable in &preview.saved_variables {
-                let path = Path::new(&saved_root).join(variable);
+                let path = Path::new(saved_root).join(variable);
                 if !path.exists() {
                     fs::write(path, b"-- BronzeForge managed SavedVariables placeholder\n")?;
                 }
             }
         }
         Ok(())
+    }
+
+    fn apply_preview_elevated(
+        &mut self,
+        preview: &ProfilePreview,
+        saved_variables_path: Option<&str>,
+    ) -> ServiceResult<()> {
+        let staging_root = self
+            .directories
+            .staging
+            .join(format!("apply-elevated-{}", Uuid::new_v4()));
+        fs::create_dir_all(&staging_root)?;
+
+        let mut copy_dirs = Vec::new();
+        let mut remove_dirs = preview
+            .removals
+            .iter()
+            .map(|removal| removal.target_path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        for plan in &preview.installs {
+            let normalized_source = normalize_addon_root(&plan.source_path)?;
+            let staged_target = staging_root.join(&plan.addon.install_folder);
+            if staged_target.exists() {
+                fs::remove_dir_all(&staged_target)?;
+            }
+            copy_dir_all(&normalized_source, &staged_target)?;
+            remove_dirs.push(plan.target_path.to_string_lossy().to_string());
+            copy_dirs.push(json!({
+                "source": staged_target.to_string_lossy().to_string(),
+                "target": plan.target_path.to_string_lossy().to_string(),
+            }));
+        }
+
+        let ensure_files = saved_variables_path
+            .map(|saved_root| {
+                preview
+                    .saved_variables
+                    .iter()
+                    .map(|variable| {
+                        json!({
+                            "path": Path::new(saved_root).join(variable).to_string_lossy().to_string(),
+                            "content": "-- BronzeForge managed SavedVariables placeholder\n",
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        run_elevated_fs_plan(json!({
+            "removeDirs": remove_dirs,
+            "copyDirs": copy_dirs,
+            "copyFiles": Vec::<Value>::new(),
+            "ensureFiles": ensure_files,
+        }))
     }
 
     fn create_snapshot_for_preview(
@@ -2332,10 +2426,40 @@ impl ManagerService {
         let addons_path = settings.addons_path.ok_or_else(|| {
             ServiceError::Message("Configure the AddOns path before restore".to_string())
         })?;
-        ensure_addons_path_writable(&addons_path)?;
+        ensure_addons_path_exists(&addons_path)?;
         let snapshot_root = PathBuf::from(self.load_snapshot_path(snapshot_id)?);
+        match self.restore_snapshot_internal_local(
+            &addons_path,
+            settings.saved_variables_path.as_deref(),
+            &snapshot_root,
+        ) {
+            Ok(()) => {}
+            Err(ServiceError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && is_windows_protected_install_path(Path::new(&addons_path)) =>
+            {
+                self.restore_snapshot_internal_elevated(
+                    &addons_path,
+                    settings.saved_variables_path.as_deref(),
+                    &snapshot_root,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+        if let Some(profile_id) = snapshot.related_profile_id {
+            self.switch_profile(SwitchProfileRequest { profile_id })?;
+        }
+        Ok(())
+    }
+
+    fn restore_snapshot_internal_local(
+        &mut self,
+        addons_path: &str,
+        saved_variables_path: Option<&str>,
+        snapshot_root: &Path,
+    ) -> ServiceResult<()> {
         for addon in self.load_addons()? {
-            let live_path = Path::new(&addons_path).join(&addon.install_folder);
+            let live_path = Path::new(addons_path).join(&addon.install_folder);
             if live_path.exists() {
                 fs::remove_dir_all(&live_path)?;
             }
@@ -2345,14 +2469,11 @@ impl ManagerService {
             for entry in fs::read_dir(&addon_snapshot_root)? {
                 let entry = entry?;
                 if entry.path().is_dir() {
-                    copy_dir_all(
-                        &entry.path(),
-                        &Path::new(&addons_path).join(entry.file_name()),
-                    )?;
+                    copy_dir_all(&entry.path(), &Path::new(addons_path).join(entry.file_name()))?;
                 }
             }
         }
-        if let Some(saved_root) = settings.saved_variables_path {
+        if let Some(saved_root) = saved_variables_path {
             let saved_snapshot_root = snapshot_root.join("savedVariables");
             if saved_snapshot_root.exists() {
                 for entry in WalkDir::new(&saved_snapshot_root)
@@ -2365,7 +2486,7 @@ impl ManagerService {
                             .path()
                             .strip_prefix(&saved_snapshot_root)
                             .map_err(|error| ServiceError::Message(error.to_string()))?;
-                        let target = Path::new(&saved_root).join(relative);
+                        let target = Path::new(saved_root).join(relative);
                         if let Some(parent) = target.parent() {
                             fs::create_dir_all(parent)?;
                         }
@@ -2374,10 +2495,69 @@ impl ManagerService {
                 }
             }
         }
-        if let Some(profile_id) = snapshot.related_profile_id {
-            self.switch_profile(SwitchProfileRequest { profile_id })?;
-        }
         Ok(())
+    }
+
+    fn restore_snapshot_internal_elevated(
+        &mut self,
+        addons_path: &str,
+        saved_variables_path: Option<&str>,
+        snapshot_root: &Path,
+    ) -> ServiceResult<()> {
+        let remove_dirs = self
+            .load_addons()?
+            .into_iter()
+            .map(|addon| {
+                Path::new(addons_path)
+                    .join(addon.install_folder)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        let addon_snapshot_root = snapshot_root.join("addons");
+        let mut copy_dirs = Vec::new();
+        if addon_snapshot_root.exists() {
+            for entry in fs::read_dir(&addon_snapshot_root)? {
+                let entry = entry?;
+                if entry.path().is_dir() {
+                    copy_dirs.push(json!({
+                        "source": entry.path().to_string_lossy().to_string(),
+                        "target": Path::new(addons_path).join(entry.file_name()).to_string_lossy().to_string(),
+                    }));
+                }
+            }
+        }
+
+        let mut copy_files = Vec::new();
+        if let Some(saved_root) = saved_variables_path {
+            let saved_snapshot_root = snapshot_root.join("savedVariables");
+            if saved_snapshot_root.exists() {
+                for entry in WalkDir::new(&saved_snapshot_root)
+                    .min_depth(1)
+                    .into_iter()
+                    .flatten()
+                {
+                    if entry.path().is_file() {
+                        let relative = entry
+                            .path()
+                            .strip_prefix(&saved_snapshot_root)
+                            .map_err(|error| ServiceError::Message(error.to_string()))?;
+                        copy_files.push(json!({
+                            "source": entry.path().to_string_lossy().to_string(),
+                            "target": Path::new(saved_root).join(relative).to_string_lossy().to_string(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        run_elevated_fs_plan(json!({
+            "removeDirs": remove_dirs,
+            "copyDirs": copy_dirs,
+            "copyFiles": copy_files,
+            "ensureFiles": Vec::<Value>::new(),
+        }))
     }
 
     fn prune_snapshots(&mut self) -> ServiceResult<()> {
@@ -2465,7 +2645,8 @@ impl ManagerService {
         conflicts: Vec<String>,
         saved_variables: Vec<String>,
         core: bool,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<String> {
+        let resolved_addon_id = self.resolve_addon_identity(addon_id, install_folder)?;
         let now = now_string();
         self.connection.execute(
             "INSERT INTO addons (id, display_name, install_folder, default_channel, notes, dependencies_json, conflicts_json, saved_variables_json, is_core, created_at, updated_at)
@@ -2480,7 +2661,89 @@ impl ManagerService {
                saved_variables_json = excluded.saved_variables_json,
                is_core = excluded.is_core,
                updated_at = excluded.updated_at",
-            params![addon_id, display_name, install_folder, default_channel.to_string(), notes, serde_json::to_string(&dependencies)?, serde_json::to_string(&conflicts)?, serde_json::to_string(&saved_variables)?, core as i64, now],
+            params![resolved_addon_id, display_name, install_folder, default_channel.to_string(), notes, serde_json::to_string(&dependencies)?, serde_json::to_string(&conflicts)?, serde_json::to_string(&saved_variables)?, core as i64, now],
+        )?;
+        Ok(resolved_addon_id)
+    }
+
+    fn resolve_addon_identity(&mut self, addon_id: &str, install_folder: &str) -> ServiceResult<String> {
+        let Some(existing) = self.load_addon_by_install_folder(install_folder)? else {
+            return Ok(addon_id.to_string());
+        };
+        if existing.id == addon_id {
+            return Ok(addon_id.to_string());
+        }
+        if canonicalize_addon_identity(&existing.id) == canonicalize_addon_identity(addon_id) {
+            return Ok(existing.id);
+        }
+        if self.load_addon(addon_id).is_err() {
+            self.reassign_addon_identity(&existing.id, addon_id)?;
+            return Ok(addon_id.to_string());
+        }
+        Err(ServiceError::Message(format!(
+            "Install folder '{}' is already assigned to addon '{}'",
+            install_folder, existing.id
+        )))
+    }
+
+    fn resolve_catalog_addon_id(
+        &self,
+        requested_addon_id: &str,
+        product_name: &str,
+    ) -> ServiceResult<String> {
+        if self.load_addon(requested_addon_id).is_ok() {
+            return Ok(requested_addon_id.to_string());
+        }
+        let install_folder = product_name.replace(' ', "");
+        if let Some(existing) = self.load_addon_by_install_folder(&install_folder)? {
+            return Ok(existing.id);
+        }
+        let requested_canonical = canonicalize_addon_identity(requested_addon_id);
+        let product_name_canonical = canonicalize_addon_identity(product_name);
+        let install_folder_canonical = canonicalize_addon_identity(&install_folder);
+        if let Some(existing) = self.load_addons()?.into_iter().find(|addon| {
+            let addon_id_canonical = canonicalize_addon_identity(&addon.id);
+            let display_name_canonical = canonicalize_addon_identity(&addon.display_name);
+            let addon_install_folder_canonical = canonicalize_addon_identity(&addon.install_folder);
+
+            addon_id_canonical == requested_canonical
+                || addon_id_canonical == product_name_canonical
+                || addon_id_canonical == install_folder_canonical
+                || display_name_canonical == requested_canonical
+                || display_name_canonical == product_name_canonical
+                || addon_install_folder_canonical == requested_canonical
+                || addon_install_folder_canonical == product_name_canonical
+                || addon_install_folder_canonical == install_folder_canonical
+        }) {
+            return Ok(existing.id);
+        }
+        Ok(requested_addon_id.to_string())
+    }
+
+    fn reassign_addon_identity(
+        &mut self,
+        from_addon_id: &str,
+        to_addon_id: &str,
+    ) -> ServiceResult<()> {
+        self.connection.execute(
+            "UPDATE addons SET id = ?2 WHERE id = ?1",
+            params![from_addon_id, to_addon_id],
+        )?;
+        self.connection.execute(
+            "UPDATE sources SET addon_id = ?2 WHERE addon_id = ?1",
+            params![from_addon_id, to_addon_id],
+        )?;
+        self.connection.execute(
+            "UPDATE revisions SET addon_id = ?2 WHERE addon_id = ?1",
+            params![from_addon_id, to_addon_id],
+        )?;
+        self.connection.execute(
+            "UPDATE profile_addons SET addon_id = ?2 WHERE addon_id = ?1",
+            params![from_addon_id, to_addon_id],
+        )?;
+        self.connection.execute(
+            "UPDATE snapshot_items SET addon_id = ?2 WHERE addon_id = ?1",
+            params![from_addon_id, to_addon_id],
         )?;
         Ok(())
     }
@@ -2601,6 +2864,16 @@ impl ManagerService {
         products: &std::collections::BTreeMap<String, RemoteManifestProduct>,
     ) -> ServiceResult<CuratedPackSummary> {
         let channel = update_channel_to_channel(settings.update_channel);
+        let live_folders = settings
+            .addons_path
+            .as_ref()
+            .map(|addons_path| self.scan_live_addons(Path::new(addons_path)))
+            .transpose()?
+            .unwrap_or_default();
+        let live_folder_names = live_folders
+            .iter()
+            .map(|folder| folder.name.clone())
+            .collect::<HashSet<_>>();
         let mut members = Vec::new();
         for member in &pack.members {
             let product = products.get(&member.product_id).ok_or_else(|| {
@@ -2609,9 +2882,10 @@ impl ManagerService {
                     pack.pack_id, member.product_id
                 ))
             })?;
-            let addon = self.load_addon(&member.product_id).ok();
+            let resolved_addon_id = self.resolve_catalog_addon_id(&member.product_id, &product.name)?;
+            let addon = self.load_addon(&resolved_addon_id).ok();
             let current_version = self
-                .latest_revision_for_channel(&member.product_id, channel)?
+                .latest_revision_for_channel(&resolved_addon_id, channel)?
                 .map(|revision| revision.version);
             let install_folder = addon
                 .as_ref()
@@ -2621,16 +2895,18 @@ impl ManagerService {
                 .as_ref()
                 .map(|entry| entry.display_name.clone())
                 .unwrap_or_else(|| product.name.clone());
-            let update_available = UpdateProvider::is_remote_newer(
-                &product.latest_version,
-                current_version.as_deref(),
-            );
+            let installed = live_folder_names.contains(&install_folder);
+            let update_available = installed
+                && current_version
+                    .as_deref()
+                    .map(|version| UpdateProvider::is_remote_newer(&product.latest_version, Some(version)))
+                    .unwrap_or(false);
             members.push(LauncherPackMember {
-                addon_id: member.product_id.clone(),
+                addon_id: resolved_addon_id,
                 display_name,
                 install_folder,
                 required: member.required,
-                installed: current_version.is_some(),
+                installed,
                 current_version,
                 latest_version: Some(product.latest_version.clone()),
                 update_available,
@@ -2683,11 +2959,24 @@ impl ManagerService {
 
     fn ensure_pack_profile(&mut self, pack: &RemoteManifestPack) -> ServiceResult<String> {
         let profile_id = pack_profile_id(&pack.pack_id);
-        let addon_ids = pack
-            .members
-            .iter()
-            .map(|member| member.product_id.clone())
-            .collect::<HashSet<_>>();
+        let settings = self.load_settings()?;
+        let products = self
+            .load_cached_remote_products(settings.update_channel)?
+            .into_iter()
+            .map(|product| (product.id.clone(), product))
+            .collect::<HashMap<_, _>>();
+        let mut addon_ids = HashSet::new();
+        for member in &pack.members {
+            let product = products.get(&member.product_id).ok_or_else(|| {
+                ServiceError::Message(format!(
+                    "Pack '{}' references missing product '{}'",
+                    pack.pack_id, member.product_id
+                ))
+            })?;
+            let resolved_addon_id =
+                self.resolve_catalog_addon_id(&member.product_id, &product.name)?;
+            addon_ids.insert(resolved_addon_id);
+        }
         let selections = self
             .load_addons()?
             .into_iter()
@@ -2994,6 +3283,13 @@ impl ManagerService {
             .into_iter()
             .find(|addon| addon.id == addon_id)
             .ok_or_else(|| ServiceError::Message(format!("Unknown addon '{addon_id}'")))
+    }
+
+    fn load_addon_by_install_folder(&self, install_folder: &str) -> ServiceResult<Option<AddonRow>> {
+        Ok(self
+            .load_addons()?
+            .into_iter()
+            .find(|addon| addon.install_folder.eq_ignore_ascii_case(install_folder)))
     }
 
     fn load_sources(&self) -> ServiceResult<Vec<SourceRow>> {
@@ -3552,92 +3848,147 @@ fn copy_dir_all(source: &Path, destination: &Path) -> ServiceResult<()> {
     Ok(())
 }
 
-fn ensure_addons_path_writable(addons_path: &str) -> ServiceResult<()> {
-    match probe_addons_writable(addons_path) {
-        Ok(()) => return Ok(()),
-        Err(first_error) => {
-            if !is_windows_protected_install_path(Path::new(addons_path)) {
-                return Err(first_error);
-            }
-            // The path is under Program Files — attempt a one-time elevated
-            // permission grant so future operations work without admin rights.
-            if let Err(fix_error) = elevate_addons_permissions(addons_path) {
-                // If the user declined UAC or it failed, report the original error
-                // with context about the fix attempt.
-                return Err(ServiceError::Message(format!(
-                    "Cannot write to AddOns folder at '{}': permission denied. \
-                     An automatic permission fix was attempted but failed ({}). \
-                     To fix manually, run an elevated terminal and execute: \
-                     icacls \"{}\" /grant *S-1-5-32-545:(OI)(CI)M /T",
-                    addons_path, fix_error, addons_path
-                )));
-            }
-            // Retry after the elevated fix.
-            probe_addons_writable(addons_path)
-        }
-    }
-}
-
-fn probe_addons_writable(addons_path: &str) -> ServiceResult<()> {
+fn ensure_addons_path_exists(addons_path: &str) -> ServiceResult<()> {
     let addons_root = Path::new(addons_path);
     fs::create_dir_all(addons_root)
         .map_err(|error| map_addons_path_error(addons_path, "create", error))?;
 
-    // Test by creating a subdirectory and writing a file inside it — this mirrors
-    // what sync actually does (creates per-addon subdirs) and will surface permission
-    // errors that a root-only file write would miss.
-    let probe_dir = addons_root.join(format!(".bronze-forge-probe-{}", Uuid::new_v4()));
-    let result = (|| -> ServiceResult<()> {
-        fs::create_dir(&probe_dir)
-            .map_err(|error| map_addons_path_error(addons_path, "write to", error))?;
-        fs::write(probe_dir.join("probe"), b"probe")
-            .map_err(|error| map_addons_path_error(addons_path, "write to", error))
-    })();
-    let _ = fs::remove_dir_all(&probe_dir);
-    result
+    Ok(())
 }
 
-/// Spawn an elevated process that grants the Users group modify access to the
-/// AddOns directory tree. On Windows this invokes `icacls` via PowerShell's
-/// `Start-Process -Verb runas -Wait`, which triggers a single UAC consent
-/// prompt and blocks until the permission change completes. On non-Windows
-/// this is a no-op (Program Files paths don't exist there).
-fn elevate_addons_permissions(addons_path: &str) -> Result<(), String> {
+fn run_elevated_fs_plan(plan: Value) -> ServiceResult<()> {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = addons_path;
-        return Err("elevated permission fix is only available on Windows".to_string());
+        let _ = plan;
+        return Err(ServiceError::Message(
+            "Elevated file operations are only available on Windows".to_string(),
+        ));
     }
 
     #[cfg(target_os = "windows")]
     {
-        // Grant the built-in Users group (S-1-5-32-545) Modify access,
-        // inheritable to child objects, recursively.
-        // Use Start-Process -Wait so this call blocks until icacls finishes,
-        // eliminating the race between the UAC elevation and the probe retry.
-        let icacls_args = format!(
-            "/c icacls \"{}\" /grant *S-1-5-32-545:(OI)(CI)M /T",
-            addons_path
-        );
-        let ps_command = format!(
-            "Start-Process -FilePath cmd.exe -ArgumentList '{}' -Verb runas -Wait",
-            icacls_args.replace('\'', "''")
-        );
+        let temp_root =
+            std::env::temp_dir().join(format!("bronze-forge-elevated-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root)?;
+        let script_path = temp_root.join("apply-plan.ps1");
+        let plan_path = temp_root.join("plan.json");
+        fs::write(&script_path, elevated_fs_script())?;
+        fs::write(&plan_path, serde_json::to_vec(&plan)?)?;
 
-        let status = Command::new("powershell")
-            .args(["-NonInteractive", "-NoProfile", "-Command", &ps_command])
-            .status()
-            .map_err(|e| format!("Failed to launch permission fix: {}", e))?;
+        let command = build_elevated_powershell_command(&script_path, &plan_path);
+        let output = Command::new("powershell")
+            .args([
+                "-NonInteractive",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &command,
+            ])
+            .output()
+            .map_err(|error| {
+                ServiceError::Message(format!(
+                    "Failed to launch elevated file operation: {error}"
+                ))
+            })?;
 
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Permission fix exited with code {}",
-                status.code().unwrap_or(-1)
-            ))
+        let _ = fs::remove_dir_all(&temp_root);
+
+        if output.status.success() {
+            return Ok(());
         }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit code {}", output.status.code().unwrap_or(-1))
+        };
+        Err(ServiceError::Message(format!(
+            "Elevated addon file operation failed: {}",
+            details
+        )))
     }
+}
+
+fn elevated_fs_script() -> &'static str {
+    r#"
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$PlanPath
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Remove-DirectoryIfPresent {
+    param([string]$Path)
+
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    }
+}
+
+$plan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json
+
+foreach ($dir in @($plan.removeDirs)) {
+    Remove-DirectoryIfPresent -Path $dir
+}
+
+foreach ($copyDir in @($plan.copyDirs)) {
+    $targetParent = Split-Path -Parent $copyDir.target
+    if (-not [string]::IsNullOrWhiteSpace($targetParent)) {
+        New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $copyDir.source -Destination $copyDir.target -Recurse -Force -ErrorAction Stop
+}
+
+foreach ($copyFile in @($plan.copyFiles)) {
+    $targetParent = Split-Path -Parent $copyFile.target
+    if (-not [string]::IsNullOrWhiteSpace($targetParent)) {
+        New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $copyFile.source -Destination $copyFile.target -Force -ErrorAction Stop
+}
+
+foreach ($file in @($plan.ensureFiles)) {
+    if (-not (Test-Path -LiteralPath $file.path)) {
+        $targetParent = Split-Path -Parent $file.path
+        if (-not [string]::IsNullOrWhiteSpace($targetParent)) {
+            New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+        }
+        Set-Content -LiteralPath $file.path -Value $file.content -NoNewline -ErrorAction Stop
+    }
+}
+"#
+}
+
+fn build_elevated_powershell_command(script_path: &Path, plan_path: &Path) -> String {
+    let args = [
+        "-NonInteractive".to_string(),
+        "-NoProfile".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-File".to_string(),
+        script_path.to_string_lossy().to_string(),
+        "-PlanPath".to_string(),
+        plan_path.to_string_lossy().to_string(),
+    ]
+    .into_iter()
+    .map(|value| powershell_single_quote(&value))
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    format!(
+        "$process = Start-Process -FilePath powershell.exe -ArgumentList @({}) -Verb RunAs -Wait -PassThru; exit $process.ExitCode",
+        args
+    )
+}
+
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn map_addons_path_error(
@@ -3702,6 +4053,14 @@ fn normalize_windows_path_for_comparison(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+fn canonicalize_addon_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
 /// Move a directory, falling back to copy+delete when rename fails
 /// (e.g. across volumes or NTFS security boundaries like Program Files).
 fn move_dir(source: &Path, destination: &Path) -> ServiceResult<()> {
@@ -3762,10 +4121,15 @@ fn zip_directory(
 mod tests {
     use super::{
         ManagerService, detect_path_candidates, is_windows_protected_install_path,
+        now_string,
     };
     use crate::models::{
         Channel, CreateProfileRequest, InstallAddonRequest, ProfileSelectionInput,
-        RegisterSourceRequest, SaveSettingsRequest, SourceKind, SyncProfileRequest,
+        RegisterSourceRequest, RemoteProductType, SaveSettingsRequest, SourceKind,
+        SyncProfileRequest, UpdateChannel,
+    };
+    use crate::update_provider::{
+        RemoteManifestPack, RemoteManifestPackMember, RemoteManifestProduct,
     };
     use std::{fs, path::Path};
 
@@ -4060,5 +4424,277 @@ mod tests {
         let result = apply_selection_override(selections, "addon-b", false, None);
         assert_eq!(result.len(), 2);
         assert!(result.iter().any(|s| s.addon_id == "addon-b" && !s.enabled));
+    }
+
+    #[test]
+    fn powershell_single_quote_escapes_embedded_quotes() {
+        use super::powershell_single_quote;
+
+        assert_eq!(powershell_single_quote("C:/Games/Ascension"), "'C:/Games/Ascension'");
+        assert_eq!(
+            powershell_single_quote("C:/Player's Folder/AddOns"),
+            "'C:/Player''s Folder/AddOns'"
+        );
+    }
+
+    #[test]
+    fn elevated_command_waits_for_child_and_propagates_exit_code() {
+        use super::build_elevated_powershell_command;
+
+        let script = Path::new(r"C:\Temp\Player's Script.ps1");
+        let plan = Path::new(r"C:\Temp\plan.json");
+        let command = build_elevated_powershell_command(script, plan);
+
+        assert!(command.contains("Start-Process -FilePath powershell.exe"));
+        assert!(command.contains("-Wait -PassThru"));
+        assert!(command.contains("exit $process.ExitCode"));
+        assert!(command.contains("'C:\\Temp\\Player''s Script.ps1'"));
+        assert!(command.contains("'C:\\Temp\\plan.json'"));
+    }
+
+    #[test]
+    fn build_pack_summary_detects_live_folder_without_cached_revision() {
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir().unwrap();
+        let live_addons = temp.path().join("live");
+        fs::create_dir_all(live_addons.join("DingTimer")).unwrap();
+
+        let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
+        service
+            .save_settings(SaveSettingsRequest {
+                ascension_root_path: None,
+                addons_path: Some(live_addons.to_string_lossy().to_string()),
+                saved_variables_path: Some(
+                    temp.path()
+                        .join("WTF")
+                        .join("Account")
+                        .join("SavedVariables")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                backup_retention_count: None,
+                auto_backup_enabled: None,
+                default_profile_id: None,
+                dev_mode_enabled: None,
+                maintainer_mode_enabled: None,
+                onboarding_completed: None,
+                selected_pack_id: None,
+                game_executable_path: None,
+                update_channel: None,
+                update_manifest_override: None,
+            })
+            .unwrap();
+
+        service
+            .upsert_addon(
+                "ding-timer",
+                "Ding Timer",
+                "DingTimer",
+                Channel::Stable,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+            )
+            .unwrap();
+
+        let settings = service.load_settings().unwrap();
+        let pack = RemoteManifestPack {
+            pack_id: "bronzeforge-default".to_string(),
+            name: "BronzeForge Pack".to_string(),
+            description: "Test pack".to_string(),
+            default_channel: Channel::Stable,
+            recovery_label: None,
+            recovery_description: None,
+            members: vec![RemoteManifestPackMember {
+                product_id: "ding-timer".to_string(),
+                required: true,
+            }],
+        };
+        let mut products = BTreeMap::new();
+        products.insert(
+            "ding-timer".to_string(),
+            RemoteManifestProduct {
+                id: "ding-timer".to_string(),
+                name: "Ding Timer".to_string(),
+                product_type: RemoteProductType::Addon,
+                channel: UpdateChannel::Stable,
+                latest_version: "1.2.3".to_string(),
+                published_at: now_string(),
+                release_url: "https://example.test/releases/1.2.3".to_string(),
+                package_url: "https://example.test/DingTimer.zip".to_string(),
+                sha256: "a".repeat(64),
+                size_bytes: 1234,
+                min_manager_version: None,
+                platform: Some("windows-any".to_string()),
+                install_kind: Some("addon-folder-zip".to_string()),
+                changelog: None,
+                repository: None,
+            },
+        );
+
+        let summary = service.build_pack_summary(&settings, &pack, &products).unwrap();
+        let member = &summary.members[0];
+
+        assert!(member.installed);
+        assert_eq!(member.current_version, None);
+        assert!(!member.update_available);
+    }
+
+    #[test]
+    fn upsert_addon_reassigns_existing_install_folder_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
+
+        service
+            .upsert_addon(
+                "legacy-dingtimer",
+                "Ding Timer",
+                "DingTimer",
+                Channel::Stable,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .unwrap();
+
+        service
+            .upsert_addon(
+                "ding-timer",
+                "Ding Timer",
+                "DingTimer",
+                Channel::Stable,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .unwrap();
+
+        assert!(service.load_addon("ding-timer").is_ok());
+        assert!(service.load_addon("legacy-dingtimer").is_err());
+        let addons = service.load_addons().unwrap();
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].id, "ding-timer");
+        assert_eq!(addons[0].install_folder, "DingTimer");
+    }
+
+    #[test]
+    fn resolve_catalog_addon_id_matches_punctuation_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
+
+        service
+            .upsert_addon(
+                "dingtimer",
+                "Ding Timer",
+                "DingTimer",
+                Channel::Stable,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .unwrap();
+
+        let resolved = service
+            .resolve_catalog_addon_id("ding-timer", "Ding Timer")
+            .unwrap();
+
+        assert_eq!(resolved, "dingtimer");
+    }
+
+    #[test]
+    fn resolve_catalog_addon_id_matches_install_folder_when_product_name_is_slug() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
+
+        service
+            .upsert_addon(
+                "dingtimer",
+                "Ding Timer",
+                "DingTimer",
+                Channel::Stable,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .unwrap();
+
+        let resolved = service
+            .resolve_catalog_addon_id("ding-timer", "ding-timer")
+            .unwrap();
+
+        assert_eq!(resolved, "dingtimer");
+    }
+
+    #[test]
+    fn ensure_pack_profile_uses_remote_product_name_for_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = ManagerService::for_test(temp.path().join("app")).unwrap();
+
+        service
+            .upsert_addon(
+                "dingtimer",
+                "Ding Timer",
+                "DingTimer",
+                Channel::Stable,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .unwrap();
+
+        let settings = service.load_settings().unwrap();
+        let product = RemoteManifestProduct {
+            id: "ding-timer".to_string(),
+            name: "Ding Timer".to_string(),
+            product_type: RemoteProductType::Addon,
+            channel: UpdateChannel::Stable,
+            latest_version: "1.0.0".to_string(),
+            published_at: now_string(),
+            release_url: "https://example.test/releases/1.0.0".to_string(),
+            package_url: "https://example.test/DingTimer.zip".to_string(),
+            sha256: "a".repeat(64),
+            size_bytes: 1234,
+            min_manager_version: None,
+            platform: Some("windows-any".to_string()),
+            install_kind: Some("addon-folder-zip".to_string()),
+            changelog: None,
+            repository: None,
+        };
+        service
+            .cache_remote_products(settings.update_channel, &[product])
+            .unwrap();
+
+        let profile_id = service
+            .ensure_pack_profile(&RemoteManifestPack {
+                pack_id: "bronzeforge-default".to_string(),
+                name: "BronzeForge Pack".to_string(),
+                description: "Test pack".to_string(),
+                default_channel: Channel::Stable,
+                recovery_label: None,
+                recovery_description: None,
+                members: vec![RemoteManifestPackMember {
+                    product_id: "ding-timer".to_string(),
+                    required: true,
+                }],
+            })
+            .unwrap();
+
+        let selections = service.load_profile_selections(&profile_id).unwrap();
+        assert!(selections
+            .iter()
+            .any(|selection| selection.addon_id == "dingtimer" && selection.enabled));
     }
 }

@@ -2,8 +2,10 @@ import { invoke } from '@tauri-apps/api/core'
 
 import type { LauncherGateway } from './launcherGateway'
 import type {
+  ApplyRemoteAddonUpdateRequest,
   CreateProfileRequest,
   DetectPathsResponse,
+  InstallAddonRequest,
   LauncherStateResponse,
   OperationResponse,
   RegisterSourceRequest,
@@ -42,6 +44,22 @@ export class TauriLauncherGateway implements LauncherGateway {
 
   syncCuratedPack(): Promise<LauncherStateResponse> {
     return tauriInvoke('sync_curated_pack')
+  }
+
+  applyRemoteAddonUpdate(request: ApplyRemoteAddonUpdateRequest): Promise<OperationResponse> {
+    return tauriInvoke('apply_remote_addon_update', { request })
+  }
+
+  installAddon(request: InstallAddonRequest): Promise<OperationResponse> {
+    return tauriInvoke('install_addon', { request })
+  }
+
+  updateAddon(request: InstallAddonRequest): Promise<OperationResponse> {
+    return tauriInvoke('update_addon', { request })
+  }
+
+  uninstallAddon(request: InstallAddonRequest): Promise<OperationResponse> {
+    return tauriInvoke('uninstall_addon', { request })
   }
 
   restoreLastKnownGood(request: RestoreLastKnownGoodRequest = {}): Promise<OperationResponse> {

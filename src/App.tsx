@@ -16,10 +16,12 @@ import clsx from 'clsx'
 import { api } from './lib/api'
 import { formatBytes, formatWhen } from './lib/format'
 import {
+  canAdoptPackMember,
   canAutoSetup,
   canLaunchGame,
   canOpenAddonsFolder,
   descriptionForPackMember,
+  findAdoptablePackMemberFolder,
   getPrimaryAction,
   isProtectedAddonsPermissionError,
   labelForPackMember,
@@ -34,6 +36,7 @@ import {
 import type {
   Channel,
   DetectPathCandidate,
+  LauncherPackMember,
   LauncherStateResponse,
   OperationResponse,
   SaveSettingsRequest,
@@ -178,6 +181,50 @@ function App() {
   async function syncPack() {
     const next = await run('sync', () => api.syncCuratedPack(), 'Pack synced.')
     if (next) await refresh()
+  }
+
+  async function applyPackMember(member: LauncherPackMember) {
+    const action = !member.installed ? 'install' : member.updateAvailable ? 'update' : 'reinstall'
+    const response = await run(action, () => api.applyRemoteAddonUpdate({ addonId: member.addonId }))
+    if (response?.ok && response.applied) {
+      setNotice(response.message)
+      await refresh()
+      return
+    }
+    if (response) {
+      const blocker = response.preview.blockers[0]?.message
+      setError(blocker ?? response.message)
+    }
+  }
+
+  async function adoptPackMember(member: LauncherPackMember) {
+    if (!launcher) return
+    const folder = findAdoptablePackMemberFolder(launcher, member)
+    if (!folder) {
+      setError(`No installed folder was found for ${member.displayName}.`)
+      return
+    }
+
+    const result = await run(
+      'adopt addon',
+      () =>
+        api.registerSource({
+          sourceKind: 'local-folder',
+          path: folder.path,
+          channel: 'stable',
+          core: member.required,
+        }),
+      `${member.displayName} adopted from the local AddOns folder.`,
+    )
+    if (result) {
+      await refresh()
+    }
+  }
+
+  function labelForPackMemberAction(member: LauncherPackMember): string {
+    if (!member.installed) return `Install ${member.displayName}`
+    if (member.updateAvailable) return `Update ${member.displayName}`
+    return `Reinstall ${member.displayName}`
   }
 
   async function previewRestore() {
@@ -331,6 +378,31 @@ function App() {
                       <Pill tone={toneForPackMember(member)}>
                         {labelForPackMember(member)}
                       </Pill>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                      <p className="text-xs text-[#a8927b]">
+                        Latest {member.latestVersion ?? 'unknown'}
+                      </p>
+                      <div className="flex flex-wrap gap-3">
+                        {canAdoptPackMember(launcher, member) ? (
+                          <button
+                            className="button-secondary"
+                            disabled={working !== null}
+                            aria-label={`Use Installed ${member.displayName}`}
+                            onClick={() => void adoptPackMember(member)}
+                          >
+                            {`Use Installed ${member.displayName}`}
+                          </button>
+                        ) : null}
+                        <button
+                          className={clsx(member.installed && !member.updateAvailable ? 'button-secondary' : 'button-primary')}
+                          disabled={working !== null}
+                          aria-label={labelForPackMemberAction(member)}
+                          onClick={() => void applyPackMember(member)}
+                        >
+                          {labelForPackMemberAction(member)}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}

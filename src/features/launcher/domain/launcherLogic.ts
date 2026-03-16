@@ -1,4 +1,4 @@
-import type { LauncherPackMember, LauncherStateResponse, SnapshotSummary } from '../../../types'
+import type { LauncherPackMember, LauncherStateResponse, LiveFolderState, SnapshotSummary } from '../../../types'
 
 export function canAutoSetup(launcher: LauncherStateResponse, autoSetupAttempted: boolean): boolean {
   return (
@@ -56,7 +56,28 @@ export function labelForPackMember(member: LauncherPackMember): string {
 }
 
 export function descriptionForPackMember(member: LauncherPackMember): string {
-  return member.currentVersion ? `Installed ${member.currentVersion}` : 'Not installed yet'
+  if (member.installed && member.currentVersion) return `Installed ${member.currentVersion}`
+  if (member.installed) return 'Installed (version unknown)'
+  return 'Not installed yet'
+}
+
+export function findAdoptablePackMemberFolder(
+  launcher: LauncherStateResponse,
+  member: LauncherPackMember,
+): LiveFolderState | null {
+  if (member.installed) return null
+  return (
+    launcher.unmanagedCollisions.find(
+      (folder) => folder.name.toLowerCase() === member.installFolder.toLowerCase(),
+    ) ?? null
+  )
+}
+
+export function canAdoptPackMember(
+  launcher: LauncherStateResponse,
+  member: LauncherPackMember,
+): boolean {
+  return findAdoptablePackMemberFolder(launcher, member) !== null
 }
 
 export function toneForSnapshot(snapshot: SnapshotSummary): 'success' | 'muted' {
