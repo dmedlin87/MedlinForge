@@ -3595,9 +3595,10 @@ fn probe_addons_writable(addons_path: &str) -> ServiceResult<()> {
 }
 
 /// Spawn an elevated process that grants the Users group modify access to the
-/// AddOns directory tree. On Windows this uses `ShellExecuteW` with the "runas"
-/// verb, which triggers a single UAC consent prompt. On non-Windows this is a
-/// no-op (Program Files paths don't exist there).
+/// AddOns directory tree. On Windows this invokes `icacls` via PowerShell's
+/// `Start-Process -Verb runas -Wait`, which triggers a single UAC consent
+/// prompt and blocks until the permission change completes. On non-Windows
+/// this is a no-op (Program Files paths don't exist there).
 fn elevate_addons_permissions(addons_path: &str) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
@@ -3607,67 +3608,33 @@ fn elevate_addons_permissions(addons_path: &str) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-
-        fn to_wide(s: &str) -> Vec<u16> {
-            OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
-        }
-
         // Grant the built-in Users group (S-1-5-32-545) Modify access,
         // inheritable to child objects, recursively.
-        let params = format!(
+        // Use Start-Process -Wait so this call blocks until icacls finishes,
+        // eliminating the race between the UAC elevation and the probe retry.
+        let icacls_args = format!(
             "/c icacls \"{}\" /grant *S-1-5-32-545:(OI)(CI)M /T",
             addons_path
         );
+        let ps_command = format!(
+            "Start-Process -FilePath cmd.exe -ArgumentList '{}' -Verb runas -Wait",
+            icacls_args.replace('\'', "''")
+        );
 
-        let verb = to_wide("runas");
-        let file = to_wide("cmd.exe");
-        let parameters = to_wide(&params);
+        let status = Command::new("powershell")
+            .args(["-NonInteractive", "-NoProfile", "-Command", &ps_command])
+            .status()
+            .map_err(|e| format!("Failed to launch permission fix: {}", e))?;
 
-        // SAFETY: calling ShellExecuteW with valid wide-string pointers and a
-        // null hwnd; the OS handles the UAC prompt.
-        let result = unsafe {
-            winapi_shell_execute(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                file.as_ptr(),
-                parameters.as_ptr(),
-                std::ptr::null(),
-                0, // SW_HIDE
-            )
-        };
-        // ShellExecuteW returns an HINSTANCE > 32 on success.
-        if (result as usize) <= 32 {
-            return Err(format!("ShellExecuteW returned {}", result as usize));
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Permission fix exited with code {}",
+                status.code().unwrap_or(-1)
+            ))
         }
-        // Give the elevated process time to complete.
-        std::thread::sleep(Duration::from_secs(3));
-        Ok(())
     }
-}
-
-#[cfg(target_os = "windows")]
-unsafe fn winapi_shell_execute(
-    hwnd: *mut std::ffi::c_void,
-    verb: *const u16,
-    file: *const u16,
-    parameters: *const u16,
-    directory: *const u16,
-    show_cmd: i32,
-) -> *mut std::ffi::c_void {
-    #[link(name = "shell32")]
-    unsafe extern "system" {
-        fn ShellExecuteW(
-            hwnd: *mut std::ffi::c_void,
-            lpOperation: *const u16,
-            lpFile: *const u16,
-            lpParameters: *const u16,
-            lpDirectory: *const u16,
-            nShowCmd: i32,
-        ) -> *mut std::ffi::c_void;
-    }
-    unsafe { ShellExecuteW(hwnd, verb, file, parameters, directory, show_cmd) }
 }
 
 fn map_addons_path_error(
@@ -3686,11 +3653,21 @@ fn map_addons_path_error(
 }
 
 fn addons_permission_denied_message(addons_path: &str, action: &str) -> String {
-    format!(
-        "Cannot {} AddOns folder at '{}': permission denied. \
-         Close the game and launcher, then try again.",
-        action, addons_path
-    )
+    if is_windows_protected_install_path(Path::new(addons_path)) {
+        format!(
+            "Cannot {} AddOns folder at '{}': permission denied. \
+             This folder is in a protected location. Try running BronzeForge Manager \
+             as administrator, or reinstall Ascension Launcher to a folder outside \
+             Program Files (e.g. C:\\Games\\Ascension).",
+            action, addons_path
+        )
+    } else {
+        format!(
+            "Cannot {} AddOns folder at '{}': permission denied. \
+             Close the game and launcher, then try again.",
+            action, addons_path
+        )
+    }
 }
 
 fn is_windows_protected_install_path(path: &Path) -> bool {
