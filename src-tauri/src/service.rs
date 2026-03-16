@@ -3583,15 +3583,18 @@ fn probe_addons_writable(addons_path: &str) -> ServiceResult<()> {
     fs::create_dir_all(addons_root)
         .map_err(|error| map_addons_path_error(addons_path, "create", error))?;
 
-    let probe_path = addons_root.join(format!(".bronze-forge-write-test-{}", Uuid::new_v4()));
-    fs::write(&probe_path, b"probe")
-        .map_err(|error| map_addons_path_error(addons_path, "write to", error))?;
-
-    match fs::remove_file(&probe_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ServiceError::Io(error)),
-    }
+    // Test by creating a subdirectory and writing a file inside it — this mirrors
+    // what sync actually does (creates per-addon subdirs) and will surface permission
+    // errors that a root-only file write would miss.
+    let probe_dir = addons_root.join(format!(".bronze-forge-probe-{}", Uuid::new_v4()));
+    let result = (|| -> ServiceResult<()> {
+        fs::create_dir(&probe_dir)
+            .map_err(|error| map_addons_path_error(addons_path, "write to", error))?;
+        fs::write(probe_dir.join("probe"), b"probe")
+            .map_err(|error| map_addons_path_error(addons_path, "write to", error))
+    })();
+    let _ = fs::remove_dir_all(&probe_dir);
+    result
 }
 
 /// Spawn an elevated process that grants the Users group modify access to the
