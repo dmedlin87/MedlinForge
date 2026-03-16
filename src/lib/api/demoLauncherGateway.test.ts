@@ -228,6 +228,202 @@ describe('createProfile', () => {
 })
 
 // ---------------------------------------------------------------------------
+// detectPaths
+// ---------------------------------------------------------------------------
+
+describe('detectPaths', () => {
+  it('returns the detected candidates for the scenario', async () => {
+    const gw = new DemoLauncherGateway('single-setup')
+    const result = await gw.detectPaths()
+    expect(result.candidates).toHaveLength(1)
+    expect(result.candidates[0].ascensionRootPath).toBeTruthy()
+  })
+
+  it('returns multiple candidates for multiple-setup scenario', async () => {
+    const gw = new DemoLauncherGateway('multiple-setup')
+    const result = await gw.detectPaths()
+    expect(result.candidates.length).toBeGreaterThan(1)
+  })
+
+  it('returns current settings alongside candidates', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const result = await gw.detectPaths()
+    expect(result.settings).toBeDefined()
+    expect(result.settings.updateChannel).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// scanLiveState
+// ---------------------------------------------------------------------------
+
+describe('scanLiveState', () => {
+  it('returns addons, profiles, and snapshots from the store', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const scan = await gw.scanLiveState()
+    expect(scan.addons.length).toBeGreaterThan(0)
+    expect(scan.profiles.length).toBeGreaterThan(0)
+    expect(scan.snapshots.length).toBeGreaterThan(0)
+  })
+
+  it('reflects maintainer mode in settings when scenario is maintainer-mode', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    const scan = await gw.scanLiveState()
+    expect(scan.settings.maintainerModeEnabled).toBe(true)
+    expect(scan.settings.devModeEnabled).toBe(true)
+  })
+
+  it('exposes the activeProfileId', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    const scan = await gw.scanLiveState()
+    expect(scan.activeProfileId).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// setMaintainerMode
+// ---------------------------------------------------------------------------
+
+describe('setMaintainerMode', () => {
+  it('enables maintainer mode and returns updated launcher state', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const before = await gw.getLauncherState()
+    expect(before.settings.maintainerModeEnabled).toBe(false)
+
+    const after = await gw.setMaintainerMode({ enabled: true })
+    expect(after.settings.maintainerModeEnabled).toBe(true)
+    expect(after.settings.devModeEnabled).toBe(true)
+  })
+
+  it('disables maintainer mode and returns updated launcher state', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    const after = await gw.setMaintainerMode({ enabled: false })
+    expect(after.settings.maintainerModeEnabled).toBe(false)
+    expect(after.settings.devModeEnabled).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// launchGame
+// ---------------------------------------------------------------------------
+
+describe('launchGame', () => {
+  it('returns the configured game executable path', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const path = await gw.launchGame()
+    expect(typeof path).toBe('string')
+    expect(path.length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// openAddonsFolder
+// ---------------------------------------------------------------------------
+
+describe('openAddonsFolder', () => {
+  it('returns the configured addons path', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const path = await gw.openAddonsFolder()
+    expect(typeof path).toBe('string')
+    expect(path.toLowerCase()).toContain('addons')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// registerSource
+// ---------------------------------------------------------------------------
+
+describe('registerSource', () => {
+  it('adds a new addon to the scan state', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    const before = await gw.scanLiveState()
+    const countBefore = before.addons.length
+
+    await gw.registerSource({ sourceKind: 'local-folder', path: 'C:\\MyAddons\\CustomUI', channel: 'stable', core: false })
+
+    const after = await gw.scanLiveState()
+    expect(after.addons.length).toBe(countBefore + 1)
+  })
+
+  it('registered addon carries the correct sourceKind', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    await gw.registerSource({ sourceKind: 'zip-file', path: 'C:\\Downloads\\MyAddon.zip', channel: 'beta' })
+
+    const scan = await gw.scanLiveState()
+    const registered = scan.addons.at(-1)!
+    expect(registered.sources[0].sourceKind).toBe('zip-file')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// duplicateProfile
+// ---------------------------------------------------------------------------
+
+describe('duplicateProfile', () => {
+  it('adds a copy of the profile with Copy appended to the name', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    const before = await gw.scanLiveState()
+    const source = before.profiles[0]
+    const countBefore = before.profiles.length
+
+    await gw.duplicateProfile({ profileId: source.id })
+
+    const after = await gw.scanLiveState()
+    expect(after.profiles.length).toBe(countBefore + 1)
+    const copy = after.profiles.find((p) => p.name === `${source.name} Copy`)
+    expect(copy).toBeDefined()
+  })
+
+  it('duplicate is not active', async () => {
+    const gw = new DemoLauncherGateway('maintainer-mode')
+    const scan = await gw.scanLiveState()
+    const source = scan.profiles[0]
+
+    await gw.duplicateProfile({ profileId: source.id })
+
+    const after = await gw.scanLiveState()
+    const copy = after.profiles.find((p) => p.name === `${source.name} Copy`)!
+    expect(copy.isActive).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// checkUpdates
+// ---------------------------------------------------------------------------
+
+describe('checkUpdates', () => {
+  it('returns a manager update entry', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const result = await gw.checkUpdates()
+    expect(result.manager).not.toBeNull()
+    expect(result.manager!.available).toBe(true)
+  })
+
+  it('returns addon update entries matching the store addons', async () => {
+    const gw = new DemoLauncherGateway('update-available-pack')
+    const result = await gw.checkUpdates()
+    expect(result.addons.length).toBeGreaterThan(0)
+    const updatable = result.addons.filter((a) => a.available)
+    expect(updatable.length).toBeGreaterThan(0)
+  })
+
+  it('marks addons as not available when already up to date', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    const result = await gw.checkUpdates()
+    for (const addon of result.addons) {
+      expect(addon.available).toBe(false)
+    }
+  })
+
+  it('reflects the current update channel from settings', async () => {
+    const gw = new DemoLauncherGateway('up-to-date-pack')
+    await gw.saveSettings({ updateChannel: 'beta' })
+    const result = await gw.checkUpdates()
+    expect(result.channel).toBe('beta')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // buildLauncherStatus — status priority ordering
 // ---------------------------------------------------------------------------
 

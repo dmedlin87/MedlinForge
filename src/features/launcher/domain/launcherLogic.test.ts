@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import type { LauncherStateResponse } from '../../../types'
+import type { LauncherPackMember, SnapshotSummary } from '../../../types'
 import {
   canAutoSetup,
   canLaunchGame,
   canOpenAddonsFolder,
+  descriptionForPackMember,
   getPrimaryAction,
   isProtectedAddonsPermissionError,
+  labelForPackMember,
   labelForPrimary,
   labelForStatus,
   requiresCandidateSelection,
   showSetupCard,
+  toneForPackMember,
+  toneForSnapshot,
   toneForStatus,
 } from './launcherLogic'
 
@@ -243,6 +248,91 @@ describe('toneForStatus', () => {
     for (const packStatus of ['ready_to_install', 'syncing'] as const) {
       expect(toneForStatus(packStatus)).toBe('muted')
     }
+  })
+})
+
+function makeMember(overrides: Partial<LauncherPackMember> = {}): LauncherPackMember {
+  return {
+    addonId: 'addon-1',
+    displayName: 'Test Addon',
+    installFolder: 'TestAddon',
+    required: true,
+    installed: false,
+    currentVersion: null,
+    latestVersion: '1.0.0',
+    updateAvailable: false,
+    ...overrides,
+  }
+}
+
+function makeSnapshot(overrides: Partial<SnapshotSummary> = {}): SnapshotSummary {
+  return {
+    id: 'snap-1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    snapshotType: 'preflight',
+    relatedProfileId: null,
+    notes: null,
+    pinned: false,
+    sizeBytes: 1024,
+    addonCount: 3,
+    ...overrides,
+  }
+}
+
+describe('toneForPackMember', () => {
+  it('returns warning when update is available', () => {
+    expect(toneForPackMember(makeMember({ installed: true, updateAvailable: true }))).toBe('warning')
+  })
+
+  it('returns success when installed and no update', () => {
+    expect(toneForPackMember(makeMember({ installed: true, updateAvailable: false }))).toBe('success')
+  })
+
+  it('returns muted when not installed', () => {
+    expect(toneForPackMember(makeMember({ installed: false, updateAvailable: false }))).toBe('muted')
+  })
+
+  it('updateAvailable takes precedence over installed', () => {
+    expect(toneForPackMember(makeMember({ installed: true, updateAvailable: true }))).toBe('warning')
+  })
+})
+
+describe('labelForPackMember', () => {
+  it('returns Update ready when update is available', () => {
+    expect(labelForPackMember(makeMember({ installed: true, updateAvailable: true }))).toBe('Update ready')
+  })
+
+  it('returns Installed when installed and no update', () => {
+    expect(labelForPackMember(makeMember({ installed: true, updateAvailable: false }))).toBe('Installed')
+  })
+
+  it('returns Waiting when not installed', () => {
+    expect(labelForPackMember(makeMember({ installed: false, updateAvailable: false }))).toBe('Waiting')
+  })
+
+  it('updateAvailable takes precedence over installed', () => {
+    expect(labelForPackMember(makeMember({ installed: true, updateAvailable: true }))).toBe('Update ready')
+  })
+})
+
+describe('descriptionForPackMember', () => {
+  it('returns version string when installed', () => {
+    expect(descriptionForPackMember(makeMember({ currentVersion: '2.3.1' }))).toBe('Installed 2.3.1')
+  })
+
+  it('returns not installed message when currentVersion is null', () => {
+    expect(descriptionForPackMember(makeMember({ currentVersion: null }))).toBe('Not installed yet')
+  })
+})
+
+describe('toneForSnapshot', () => {
+  it('returns success for recovery snapshot type', () => {
+    expect(toneForSnapshot(makeSnapshot({ snapshotType: 'recovery' }))).toBe('success')
+  })
+
+  it('returns muted for non-recovery snapshot types', () => {
+    expect(toneForSnapshot(makeSnapshot({ snapshotType: 'preflight' }))).toBe('muted')
+    expect(toneForSnapshot(makeSnapshot({ snapshotType: 'manual' }))).toBe('muted')
   })
 })
 

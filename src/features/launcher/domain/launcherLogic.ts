@@ -1,4 +1,4 @@
-import type { LauncherStateResponse } from '../../../types'
+import type { LauncherPackMember, LauncherStateResponse, SnapshotSummary } from '../../../types'
 
 export function canAutoSetup(launcher: LauncherStateResponse, autoSetupAttempted: boolean): boolean {
   return (
@@ -45,6 +45,22 @@ export function labelForStatus(status: LauncherStateResponse['packStatus']): str
 
 export function toneForStatus(status: LauncherStateResponse['packStatus']): 'success' | 'warning' | 'danger' | 'muted' {
   return status === 'up_to_date' ? 'success' : status === 'update_available' ? 'warning' : status === 'recovery_needed' || status === 'error' ? 'danger' : 'muted'
+}
+
+export function toneForPackMember(member: LauncherPackMember): 'warning' | 'success' | 'muted' {
+  return member.updateAvailable ? 'warning' : member.installed ? 'success' : 'muted'
+}
+
+export function labelForPackMember(member: LauncherPackMember): string {
+  return member.updateAvailable ? 'Update ready' : member.installed ? 'Installed' : 'Waiting'
+}
+
+export function descriptionForPackMember(member: LauncherPackMember): string {
+  return member.currentVersion ? `Installed ${member.currentVersion}` : 'Not installed yet'
+}
+
+export function toneForSnapshot(snapshot: SnapshotSummary): 'success' | 'muted' {
+  return snapshot.snapshotType === 'recovery' ? 'success' : 'muted'
 }
 
 export function isProtectedAddonsPermissionError(message: string | null): boolean {

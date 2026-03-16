@@ -19,12 +19,16 @@ import {
   canAutoSetup,
   canLaunchGame,
   canOpenAddonsFolder,
+  descriptionForPackMember,
   getPrimaryAction,
   isProtectedAddonsPermissionError,
+  labelForPackMember,
   labelForPrimary,
   labelForStatus,
   requiresCandidateSelection,
   showSetupCard,
+  toneForPackMember,
+  toneForSnapshot,
   toneForStatus,
 } from './features/launcher/domain/launcherLogic'
 import type {
@@ -322,10 +326,10 @@ function App() {
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="text-sm font-semibold text-[#f8eee2]">{member.displayName}</p>
-                        <p className="text-xs text-[#d0c0ae]">{member.currentVersion ? `Installed ${member.currentVersion}` : 'Not installed yet'}</p>
+                        <p className="text-xs text-[#d0c0ae]">{descriptionForPackMember(member)}</p>
                       </div>
-                      <Pill tone={member.updateAvailable ? 'warning' : member.installed ? 'success' : 'muted'}>
-                        {member.updateAvailable ? 'Update ready' : member.installed ? 'Installed' : 'Waiting'}
+                      <Pill tone={toneForPackMember(member)}>
+                        {labelForPackMember(member)}
                       </Pill>
                     </div>
                   </div>
@@ -367,7 +371,7 @@ function App() {
                       <p className="text-sm font-semibold text-[#f8eee2]">{snapshot.notes ?? snapshot.snapshotType}</p>
                       <p className="text-xs text-[#d0c0ae]">{formatWhen(snapshot.createdAt)} · {formatBytes(snapshot.sizeBytes)} · {snapshot.addonCount} items</p>
                     </div>
-                    <Pill tone={snapshot.snapshotType === 'recovery' ? 'success' : 'muted'}>{snapshot.snapshotType}</Pill>
+                    <Pill tone={toneForSnapshot(snapshot)}>{snapshot.snapshotType}</Pill>
                   </div>
                 ))}
               </div>
