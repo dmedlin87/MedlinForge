@@ -68,7 +68,7 @@ export function isProtectedAddonsPermissionError(message: string | null): boolea
   return Boolean(
     normalized
     && normalized.includes('addons folder')
-    && normalized.includes('protected install location')
+    && normalized.includes('in a protected location')
     && normalized.includes('administrator'),
   )
 }

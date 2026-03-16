@@ -347,10 +347,10 @@ describe('isProtectedAddonsPermissionError', () => {
     expect(isProtectedAddonsPermissionError('')).toBe(false)
   })
 
-  it('returns true for the protected install location message', () => {
+  it('returns true for the real backend protected location message', () => {
     expect(
       isProtectedAddonsPermissionError(
-        "Sync failed: Cannot write to AddOns folder at 'C:\\Program Files\\Ascension Launcher\\resources\\client\\Interface\\AddOns': Windows denied access to a protected install location. If Ascension is installed under Program Files, run BronzeForge as Administrator or move the game to a user-writable folder. If the game or launcher is open, close them and try again.",
+        "Sync failed: Cannot write to AddOns folder at 'C:\\Program Files\\Ascension Launcher\\resources\\client\\Interface\\AddOns': permission denied. This folder is in a protected location. Try running BronzeForge Manager as administrator, or reinstall Ascension Launcher to a folder outside Program Files (e.g. C:\\Games\\Ascension).",
       ),
     ).toBe(true)
   })
@@ -358,17 +358,17 @@ describe('isProtectedAddonsPermissionError', () => {
   it('is case-insensitive', () => {
     expect(
       isProtectedAddonsPermissionError(
-        'SYNC FAILED: CANNOT WRITE TO ADDONS FOLDER. PROTECTED INSTALL LOCATION. RUN AS ADMINISTRATOR.',
+        'SYNC FAILED: CANNOT WRITE TO ADDONS FOLDER. IN A PROTECTED LOCATION. RUN AS ADMINISTRATOR.',
       ),
     ).toBe(true)
   })
 
   it('requires all three substrings to match', () => {
     // missing "administrator"
-    expect(isProtectedAddonsPermissionError('addons folder protected install location')).toBe(false)
-    // missing "protected install location"
+    expect(isProtectedAddonsPermissionError('addons folder in a protected location')).toBe(false)
+    // missing "in a protected location"
     expect(isProtectedAddonsPermissionError('addons folder administrator')).toBe(false)
     // missing "addons folder"
-    expect(isProtectedAddonsPermissionError('protected install location administrator')).toBe(false)
+    expect(isProtectedAddonsPermissionError('in a protected location administrator')).toBe(false)
   })
 })
